@@ -557,6 +557,7 @@ std::unordered_map<std::string, float> NavigationEnv::get_env_data() const
 {
     return {
         {"current_goal_time_limit", m_current_goal_time_limit},
+        {"episode_count",           static_cast<float>(m_episode_count)},
     };
 }
 
@@ -565,5 +566,9 @@ void NavigationEnv::set_env_data(const std::unordered_map<std::string, float> &d
     auto it = data.find("current_goal_time_limit");
     if (it != data.end())
         m_current_goal_time_limit = it->second;
+
+    auto it2 = data.find("episode_count");
+    if (it2 != data.end())
+        m_episode_count = static_cast<int>(it2->second);
 }
 

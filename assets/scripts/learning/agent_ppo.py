@@ -95,6 +95,7 @@ class Agent:
         self.stop_on_reward    = hyperparameters.get("stop_on_reward", 999999)
         self.lr_min            = hyperparameters.get("lr_min", self.learning_rate_a)
         self.lr_decay_episodes = hyperparameters.get("lr_decay_episodes", 0)
+        self.reward_scale      = hyperparameters.get("reward_scale", 1.0)
 
         raw_hidden = hyperparameters.get("hidden_dims", 256)
         if isinstance(raw_hidden, int):
@@ -218,6 +219,18 @@ class Agent:
                 if latest_checkpoint:
                     self.actor.load_state_dict(checkpoint['actor'])
                     self.critic.load_state_dict(checkpoint['critic'])
+
+                    # If reward_scale != 1 and the checkpoint was saved without
+                    # scaling, the critic head outputs are in the old reward range.
+                    # Rescale the output layer immediately so the first rollout's
+                    # advantages are valid (avoids a catastrophic first update).
+                    if self.reward_scale != 1.0 and checkpoint.get('reward_scale', 1.0) != self.reward_scale:
+                        scale = self.reward_scale / checkpoint.get('reward_scale', 1.0)
+                        with torch.no_grad():
+                            self.critic.head.weight.mul_(scale)
+                            self.critic.head.bias.mul_(scale)
+                        print(f'Rescaled critic head by {scale:.4f} to match reward_scale={self.reward_scale}')
+
                     if is_training:
                         if 'optimizer' in checkpoint:
                             self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -281,7 +294,7 @@ class Agent:
         if not hasattr(self, 'buffer'):
             raise RuntimeError('Agent not initialized. Call setup() before observe().')
 
-        reward_f = float(reward)
+        reward_f = float(reward) * self.reward_scale
         done_b   = bool(done)
 
         # Per-step diagnostics
@@ -416,10 +429,23 @@ class Agent:
                 surr2  = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * adv_b
                 pg_loss = -torch.min(surr1, surr2).mean()
 
-                value_loss   = torch.nn.functional.mse_loss(value, ret_b)
+                # Value function clipping: prevents the critic from making
+                # large updates that destabilise advantage estimates.
+                old_val_b = batch['values']
+                value_clipped = old_val_b + torch.clamp(
+                    value - old_val_b, -self.clip_epsilon, self.clip_epsilon)
+                value_loss_unclipped = (value         - ret_b).pow(2)
+                value_loss_clipped   = (value_clipped - ret_b).pow(2)
+                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+                # Entropy floor: boost entropy_coeff when entropy collapses
+                # to prevent the policy becoming irreversibly deterministic.
+                entropy_floor = 0.5
+                effective_entropy_coeff = self.entropy_coeff * max(
+                    1.0, entropy_floor / (entropy.mean().item() + 1e-8))
                 entropy_loss = -entropy.mean()
 
-                loss = pg_loss + self.value_loss_coeff * value_loss + self.entropy_coeff * entropy_loss
+                loss = pg_loss + self.value_loss_coeff * value_loss + effective_entropy_coeff * entropy_loss
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -454,6 +480,7 @@ class Agent:
             'actor':                  self.actor.state_dict(),
             'critic':                 self.critic.state_dict(),
             'optimizer':              self.optimizer.state_dict(),
+            'reward_scale':           self.reward_scale,
             **({'scheduler': self.scheduler.state_dict()} if self.scheduler is not None else {}),
             'rewards_per_episode':    self.rewards_per_episode,
             'goal_time_limit_history':self.goal_time_limit_history,

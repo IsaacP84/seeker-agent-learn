@@ -1,6 +1,8 @@
 #include "app.h"
 #include "ui.h"
+#include "scenes/StartScene.hpp"
 #include "scenes/LearnScene.hpp"
+#include "scenes/TestScene.hpp"
 #include "python/init.h"
 
 
@@ -103,7 +105,9 @@ void Application::onInit()
         cube_obj.model(handle);
     }
 
+    sm.add_scene<StartScene>("start", sm);
     sm.add_scene<LearnScene>("learn", sm);
+    sm.add_scene<TestScene>("test", sm);
     
 }
 

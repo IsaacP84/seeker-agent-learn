@@ -1,4 +1,5 @@
 {
+    "scene": "learn",
     "is_training": true,
     "load_model": null,
     "checkpointing": {

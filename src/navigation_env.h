@@ -2,6 +2,7 @@
 #include <vector>
 #include <array>
 #include <random>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -56,8 +57,9 @@ public:
 
     struct Episode
     {
-        static constexpr int   max_steps               = 2000;
+        static constexpr int   max_steps               = 100000;
         static constexpr float goal_radius             = 1.25f;
+
         static constexpr float max_seconds             = 180.f;
         static constexpr float max_goal_search_seconds = 60.f;
         static constexpr float min_goal_search_seconds = 10.f;
@@ -69,7 +71,7 @@ public:
         // Episodes to keep boundary walls active (curriculum learning).
         // LearnScene creates the walls; after this many resets it removes them.
         // Set to 0 to disable the curriculum (no walls ever created).
-        static constexpr int boundary_wall_episodes = 500;
+        static constexpr int boundary_wall_episodes = 1000;
     };
 
     struct Reward
@@ -80,7 +82,7 @@ public:
         static constexpr float action_penalty        = 0.01f;
         static constexpr float strafe_penalty        = 0.02f;
         static constexpr float forward_reward        = 0.002f;  // bonus per step for MOVE_FORWARD on ground
-        static constexpr float goal_speed_bonus      = 5.f;     // extra added to goal_reward if reached quickly
+        static constexpr float goal_speed_bonus      = 2.f;     // extra added to goal_reward if reached quickly
         static constexpr float goal_quick_threshold  = 15.f;    // seconds — full bonus if goal reached within this
         static constexpr float max_speed             = 10.f;   // normalisation divisor for linear velocity inputs
         static constexpr float max_angular_speed     = 10.f;   // normalisation divisor for angular velocity input (rad/s)
@@ -110,6 +112,7 @@ public:
     std::unordered_map<std::string, float>     get_env_data() const;
     void                                       set_env_data(const std::unordered_map<std::string, float> &data);
     int                                        episode_count() const { return m_episode_count; }
+    void                                       disable_goal_timeout() { m_current_goal_time_limit = std::numeric_limits<float>::max(); }
 
 private:
     Magic::EntityManager *m_em     = nullptr;

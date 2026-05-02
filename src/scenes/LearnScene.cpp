@@ -1,5 +1,4 @@
 #include "LearnScene.hpp"
-#include "LoadingScene.hpp"
 
 #include "../entities/seeker.h"
 #include "../navigation_env.h"
@@ -35,7 +34,6 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/unique_ptr.h>
 
-#include <future>
 #include <random>
 
 namespace nb = nanobind;
@@ -53,31 +51,11 @@ LearnScene::~LearnScene() = default;
 void LearnScene::onCreate()
 {
     LOG("CREATING LEARN SCENE");
-
-    // Start Python import asynchronously. LoadingScene will poll this future
-    // and switch back here once it completes.
-    m_python_future = std::async(std::launch::async, []()
-    {
-        nb::gil_scoped_acquire acquire;
-        nb::module_::import_("scenes.learn_scene");
-    }).share();
-
     Seeker::LoadModel();
-
-    m_sm.add_scene<LoadingScene>("loading", m_sm, m_python_future, "learn");
-    m_loading_scene_registered = true;
-    m_sm.switch_to("loading");
 }
 
 void LearnScene::onDestroy()
 {
-    // Safe to remove here: onDestroy is never called from within LoadingScene::update(),
-    // so there is no dangling-this risk.
-    if (m_loading_scene_registered)
-    {
-        m_sm.remove_scene("loading");
-        m_loading_scene_registered = false;
-    }
 }
 
 void LearnScene::onActivate()

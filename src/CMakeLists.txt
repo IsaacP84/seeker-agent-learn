@@ -7,7 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(app
     entities/seeker.cpp
 
+    scenes/StartScene.cpp
     scenes/LearnScene.cpp
+    scenes/TestScene.cpp
     scenes/LoadingScene.cpp
     scenes/factory.cpp
 
