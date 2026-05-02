@@ -27,7 +27,7 @@ void LoadingScene::onActivate()
 {
     m_elapsed         = 0.0;
     m_last_dot_second = -1;
-    LOG("LoadingScene: waiting for Python import...");
+    Debug::Log("LoadingScene: waiting for Python import...");
 }
 
 void LoadingScene::onDeactivate() {}
@@ -40,7 +40,7 @@ void LoadingScene::update(double dt)
     if (current_second != m_last_dot_second)
     {
         m_last_dot_second = current_second;
-        LOG("Loading" + std::string(current_second % 3 + 1, '.'));
+        Debug::Log("Loading" + std::string(current_second % 3 + 1, '.'));
     }
 
     if (!m_load_future.valid())
@@ -68,7 +68,7 @@ void LoadingScene::update(double dt)
         return;
     }
 
-    LOG("LoadingScene: done, switching to " + m_target_scene);
+    Debug::Log("LoadingScene: done, switching to " + m_target_scene);
     m_load_future = {};  // prevent any accidental re-trigger
     // switch_to() calls onActivate() which runs factory/GL code;
     // defer it to the main (render) thread where the GL context is current.

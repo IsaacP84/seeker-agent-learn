@@ -133,7 +133,7 @@ void LearnScene::onActivate()
     {
         const float e  = NavigationEnv::World::max;          // 20
         const float hw = e - NavigationEnv::World::min + 2.f; // half-width: full span + 1 unit corner overlap = 21
-        const float bh = 4.f;   // tall enough to block the seeker
+        const float bh = 10.f;   // tall enough to block the seeker
         const float bt = 0.25f; // thin
         m_boundary_walls = {
             makeWall(em, {0.f, 0.f, -e}, {hw, bh, bt}), // north

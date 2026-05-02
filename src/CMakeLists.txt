@@ -144,6 +144,13 @@ target_compile_features(app PRIVATE cxx_std_20)
 install(
     DIRECTORY "${PROJECT_SOURCE_DIR}/assets/"
     DESTINATION "assets"
+    PATTERN "__pycache__" EXCLUDE
+)
+
+install(
+    DIRECTORY "${ENGINE_ASSETS_SOURCE_DIR}/"
+    DESTINATION "assets"
+    PATTERN "__pycache__" EXCLUDE
 )
 
 target_compile_options(app PRIVATE
@@ -168,6 +175,26 @@ endif()
 
 install(TARGETS app
     RUNTIME DESTINATION bin)
+
+# Install engine + Python + GLEW DLLs
+install(FILES
+    "$<TARGET_FILE_DIR:app>/libengine.dll"
+    "$<TARGET_FILE_DIR:app>/libJolt.dll"
+    "$<TARGET_FILE_DIR:app>/python314.dll"
+    "$<TARGET_FILE_DIR:app>/python3.dll"
+    DESTINATION bin
+    OPTIONAL
+)
+install(FILES "${Magic_DIR}/../../../bin/glew32.dll"
+    DESTINATION bin
+)
+
+# Install embedded Python runtime directory (exclude dev headers and pycache)
+install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python"
+    DESTINATION bin
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "include" EXCLUDE
+)
 
 # if(MINGW)
 #     find_file(_winpthread_dll "libwinpthread-1.dll"
