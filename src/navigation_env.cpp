@@ -84,6 +84,7 @@ std::vector<float> NavigationEnv::reset()
     m_prev_distance           = 0.f;
     m_last_known_goal_pos     = m_goals.empty() ? glm::vec3{0.f} : m_goals[0].pos;
     m_time_since_goal_visible = 0.f;
+    m_was_goal_visible        = false;
     return std::vector<float>(NavigationEnv::Sizes::num_states, 0.f);
 }
 
@@ -188,6 +189,9 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     bool goal_visible = !m_goals.empty() && goal_infos[m_nearest_goal_idx].visible;
     if (goal_visible)
     {
+        if (!m_was_goal_visible)
+            Debug::Log("Goal spotted (idx=" + std::to_string(m_nearest_goal_idx)
+                + ", dist=" + std::to_string(m_nearest_goal_dist) + ")");
         m_last_known_goal_pos     = goal_pos;
         m_time_since_goal_visible = 0.f;
     }
@@ -195,6 +199,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     {
         m_time_since_goal_visible += dt;
     }
+    m_was_goal_visible = goal_visible;
 
     // --- Pass 2: raycast + record + build obs (registry lock not held) ---
     // 120° FOV: 13 rays spanning -60° to +60° relative to looking direction.
@@ -350,6 +355,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     obs[idx_vel_z]     = vel.GetZ() / Reward::max_speed;
     obs[idx_vel_y]     = vel.GetY() / Reward::max_speed;
     obs[idx_ang_vel_y] = bi.GetAngularVelocity(body_id).GetY() / Reward::max_angular_speed;
+    m_speed_xz = std::sqrt(vel.GetX() * vel.GetX() + vel.GetZ() * vel.GetZ());
 
     // idx_angle_sin/cos: looking angle encoded as (sin, cos) to avoid the ±180° discontinuity.
     obs[idx_angle_sin] = std::sin(look_rad);
@@ -472,7 +478,18 @@ float NavigationEnv::compute_reward()
     float look_alignment = std::cos(glm::radians(angle_diff));
     float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? Reward::strafe_penalty : 0.f;
 
-    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty;
+    // Stuck penalty: if the agent is trying to move but barely going anywhere,
+    // it's probably wedged against a wall. Penalise to encourage going around.
+    float stuck_pen = 0.f;
+    if (m_step_count > 1 && !m_in_air && m_speed_xz < Reward::stuck_speed_threshold)
+    {
+        Seeker::Action a = pending_action();
+        if (a == Seeker::MOVE_FORWARD || a == Seeker::MOVE_BACKWARD
+            || a == Seeker::STRAFE_LEFT || a == Seeker::STRAFE_RIGHT)
+            stuck_pen = -Reward::stuck_penalty;
+    }
+
+    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty + stuck_pen;
 }
 
 bool NavigationEnv::is_done() const

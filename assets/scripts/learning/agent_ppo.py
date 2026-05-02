@@ -299,14 +299,17 @@ class Agent:
         )
 
         # Flush when buffer is full (rollout complete — truncated bootstrap)
+        _flushed_full = False
         if self.buffer.is_full():
             with torch.no_grad():
                 ns_t     = torch.tensor(next_state, dtype=torch.float32, device=device)
                 last_val = self.critic(ns_t.unsqueeze(0)).squeeze().item()
             self._run_ppo_update(last_val)
+            _flushed_full = True
 
-        # Also flush on episode end if buffer has partial data
-        if done_b and self.buffer._size > 0:
+        # Also flush on episode end if buffer has partial data (but not if we
+        # just did a full-rollout flush above — avoids a double update).
+        if done_b and not _flushed_full and self.buffer._size > 0:
             self._run_ppo_update(last_value=0.0)
 
         if done_b:
@@ -369,8 +372,9 @@ class Agent:
             self._gradient_norms       = []
             self._obs_stats_samples    = []
 
-            self.save_graph()
-            self._save_checkpoint()
+            if episode % 10 == 0:
+                self.save_graph()
+                self._save_checkpoint()
 
     # ------------------------------------------------------------------
     def _run_ppo_update(self, last_value):

@@ -57,7 +57,7 @@ public:
     struct Episode
     {
         static constexpr int   max_steps               = 2000;
-        static constexpr float goal_radius             = 0.5f;
+        static constexpr float goal_radius             = 1.25f;
         static constexpr float max_seconds             = 180.f;
         static constexpr float max_goal_search_seconds = 60.f;
         static constexpr float min_goal_search_seconds = 10.f;
@@ -83,6 +83,8 @@ public:
         static constexpr float max_angular_speed     = 10.f;   // normalisation divisor for angular velocity input (rad/s)
         static constexpr float edge_danger_dist      = 3.f;    // world units from map boundary where penalty begins
         static constexpr float edge_danger_penalty   = 0.3f;   // max penalty per step at the boundary itself
+        static constexpr float stuck_speed_threshold = 0.5f;   // m/s — below this while moving = stuck against wall
+        static constexpr float stuck_penalty         = 0.05f;  // per-step penalty when stuck
     };
 
     struct Angles
@@ -117,6 +119,8 @@ private:
     int       m_nearest_goal_idx        = 0;   // cached by get_observation, consumed by compute_reward
     float     m_nearest_goal_dist       = 0.f;
     bool      m_in_air                  = false; // cached by get_observation, consumed by compute_reward
+    bool      m_was_goal_visible        = false; // edge-detection: log only on first visible frame
+    float     m_speed_xz                = 0.f;   // cached by get_observation, consumed by compute_reward
     int       m_episode_count           = 0;   // total resets; used by LearnScene for curriculum
     float     m_elapsed_seconds         = 0.f;
     float     m_time_since_goal         = 0.f;
