@@ -132,14 +132,15 @@ void LearnScene::onActivate()
     if (NavigationEnv::Curriculum::boundary_wall_episodes > 0)
     {
         const float e  = NavigationEnv::World::max;          // 20
-        const float hw = e - NavigationEnv::World::min + 2.f; // half-width: full span + 1 unit corner overlap = 21
-        const float bh = 10.f;   // tall enough to block the seeker
-        const float bt = 0.25f; // thin
+        const float bt = 1.5f;                               // thick — robust collision
+        const float hw = e + bt + 2.f;                      // half-width: span + corner overlap
+        const float bh = 10.f;                              // tall enough to block the seeker
+        // Centre each wall at (e + bt) so the inner face sits exactly at ±e.
         m_boundary_walls = {
-            makeWall(em, {0.f, 0.f, -e}, {hw, bh, bt}), // north
-            makeWall(em, {0.f, 0.f,  e}, {hw, bh, bt}), // south
-            makeWall(em, {-e, 0.f, 0.f}, {bt, bh, hw}), // west
-            makeWall(em, { e, 0.f, 0.f}, {bt, bh, hw}), // east
+            makeWall(em, {0.f, 0.f, -(e + bt)}, {hw, bh, bt}), // north
+            makeWall(em, {0.f, 0.f,  (e + bt)}, {hw, bh, bt}), // south
+            makeWall(em, {-(e + bt), 0.f, 0.f}, {bt, bh, hw}), // west
+            makeWall(em, { (e + bt), 0.f, 0.f}, {bt, bh, hw}), // east
         };
     }
     m_walls_removed = false;
