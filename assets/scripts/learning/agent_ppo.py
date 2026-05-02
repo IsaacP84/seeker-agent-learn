@@ -301,7 +301,7 @@ class Agent:
         self._episode_reward += reward_f
         self._episode_steps  += 1
         self._action_counts[int(action)] += 1
-        if reward_f > 9.0:
+        if reward_f > 9.0 * self.reward_scale:
             self._goal_count += 1
         if self._episode_steps % 10 == 0:
             obs_arr = np.asarray(state, dtype=np.float32)

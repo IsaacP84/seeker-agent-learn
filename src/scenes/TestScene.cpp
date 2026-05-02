@@ -201,6 +201,10 @@ void TestScene::update(double dt)
             if (!m_step_func)
                 throw std::runtime_error("Python step function not loaded");
 
+            // compute_reward() handles goal collection and relocation even in
+            // inference — without it goals are never detected as reached.
+            m_env->compute_reward();
+
             nb::object action_obj = m_step_func(obs);
             int action = nb::cast<int>(action_obj);
             m_env->apply_action(action);

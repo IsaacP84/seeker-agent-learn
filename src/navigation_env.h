@@ -60,7 +60,7 @@ public:
         static constexpr int   max_steps               = 100000;
         static constexpr float goal_radius             = 1.25f;
 
-        static constexpr float max_seconds             = 180.f;
+        static constexpr float max_seconds             = 300.f;
         static constexpr float max_goal_search_seconds = 60.f;
         static constexpr float min_goal_search_seconds = 10.f;
         static constexpr float search_time_fall_rate   = 0.001f;

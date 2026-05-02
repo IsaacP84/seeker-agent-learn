@@ -5,15 +5,15 @@ from Magic import ASSETS_FOLDER
 from Magic import NavigationEnv as env
 
 
-# Set by C++ (LearnScene::onActivate) after the env is bound each activation.
+# Set by C++ (LearnScene/TestScene::onActivate) after the env is bound each activation.
 scene_env = None
-_env_bound = False
+_bound_env_id = None  # id() of the env we last bound; resets when scene_env changes
 
 def _try_bind_env():
-    global _env_bound
-    if not _env_bound and scene_env is not None:
+    global _bound_env_id
+    if scene_env is not None and id(scene_env) != _bound_env_id:
         scene_agent.bind_env(scene_env)
-        _env_bound = True
+        _bound_env_id = id(scene_env)
 
 _config_path = os.path.join(ASSETS_FOLDER, "learning", "config.json")
 with open(_config_path) as _f:
