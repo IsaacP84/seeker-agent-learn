@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pytest_cache/
+
+# Engine prebuilt binaries (downloaded via download-engine.ps1)
+engine/
+engine.zip
+
+# Build
+*build*/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# Logs and runtime artifacts
+*.log
+runs/
+assets/learning/runs/
+
+update.bat

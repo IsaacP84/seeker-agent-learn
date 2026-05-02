@@ -1,0 +1,51 @@
+seeker:
+  # --- Memory ---
+  # ~200 episodes of history at 30s timeout/~750 steps per episode.
+  # Buffer fills just as epsilon hits the floor, giving the network
+  # a full diverse batch at the start of exploitation.
+  replay_memory_size: 150000
+  mini_batch_size: 64
+
+  # --- Exploration ---
+  # Decays per step. 0.99998 → ~150k steps to floor, spreading exploration
+  # across the majority of a 250k-step run instead of collapsing at ~30k.
+  # epsilon_limit raised to 0.333 so the agent keeps some exploration even
+  # late in training.
+  # NOTE: if continuing from a checkpoint, epsilon is restored from the
+  # saved value (near 0). Reset or delete the checkpoint to benefit from
+  # the new decay schedule.
+  epsilon_init: 1.0
+  epsilon_decay: 0.99998
+  epsilon_limit: 0.333
+
+  # --- Network sync ---
+  # Target net syncs per episode (code-driven). This value is kept for
+  # reference but is not read by the current observe() implementation.
+  network_sync_rate: 100
+
+  # --- Optimiser ---
+  # 3e-4 is a reliable Adam sweet-spot; aggressive enough to learn fast
+  # without diverging.
+  learning_rate_a: 0.0003
+
+  # --- Discount ---
+  # MAX_GOAL_SEARCH_SECONDS = 30s at free-running rate ≈ 900 steps.
+  # 0.99^900 ≈ 0.0001 (credit vanishes); 0.999^900 ≈ 0.41 — agent
+  # retains meaningful credit across the full 30-second search window.
+  discount_factor_g: 0.999
+
+  # --- Stopping ---
+  # With multi-goal episodes a well-trained agent can score 150-300+ per
+  # episode (15-30 goals × ~10 + shaping). Set high so training never
+  # auto-stops early.
+  stop_on_reward: 999999
+
+  # --- Architecture ---
+  # 199 inputs → [256, 256, 128] → 6 outputs.
+  # Enough capacity for the raycast + sighting + positional features.
+  # fc1_nodes is a legacy fallback; hidden_dims takes precedence.
+  fc1_nodes: 256
+  hidden_dims: [256, 256, 128]
+
+  env_make_params:
+    use_lidar: False
