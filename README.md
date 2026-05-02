@@ -1,29 +1,47 @@
 # seeker-agent-learn
 
-This repository tracks the learning agent and navigation environment extracted from `Magic-Engine`.
+A reinforcement learning agent that learns navigation using the [Magic-Engine](https://github.com/IsaacP84/Magic-Engine) runtime.
 
-## Contents
+## Structure
 
-- `apps/navigation_env.h` / `apps/navigation_env.cpp`
-- `apps/scenes/LearnScene.hpp` / `apps/scenes/LearnScene.cpp`
-- `apps/python/navigation_env.cpp`
-- `apps/assets/scripts/scenes/learn_scene.py`
-- `apps/assets/scripts/learning/*`
-- `apps/assets/hyperparameters.yml`
-- `apps/assets/learning/config.json`
-- `monitor_training.py`
-- `detail.md`
+| Path | Description |
+|------|-------------|
+| `src/` | App entry point, scenes, entities, navigation env, Python bindings |
+| `src/scenes/LearnScene.*` | Main RL training scene |
+| `src/navigation_env.*` | Navigation environment (step/reset/reward logic) |
+| `src/entities/` | Seeker entity definition |
+| `assets/scripts/learning/` | Python training scripts |
+| `assets/hyperparameters.yml` | Hyperparameter config |
+| `monitor_training.py` | Live training monitor |
+| `download-engine.ps1` | Downloads prebuilt engine binaries from GitHub release |
+| `engine/` | Prebuilt engine binaries (not in git — see Setup below) |
 
-## Purpose
+## Setup
 
-This repo is intended as an independent learning-agent workspace that can be versioned separately from the main engine repository.
+The `engine/` directory contains prebuilt binaries for Magic-Engine and is **not stored in this repository**. Download it before building:
+
+```powershell
+.\download-engine.ps1
+```
+
+This downloads `engine.zip` from the latest GitHub release and extracts it locally.
+To force a re-download: `.\download-engine.ps1 -Force`
 
 ## Build
 
-The learning agent code depends on `Magic-Engine` for engine headers and runtime integration. Use a CMake variable such as `MagicEngine_DIR` to point to the engine source tree when configuring this repository.
+Requires CMake 3.20+, a MinGW/UCRT64 toolchain, and the `engine/` folder populated via the script above.
 
-Example:
+```powershell
+cmake -S . -B build --preset <your-preset>
+# or manually:
+cmake -S . -B build
+cmake --build build
+```
 
-```sh
-cmake -S . -B build -DMagicEngine_DIR="C:/Github/Magic-Engine/apps"
+The engine package is resolved automatically from `engine/lib/cmake/Magic`.
+
+## Training
+
+```powershell
+python monitor_training.py
 ```
