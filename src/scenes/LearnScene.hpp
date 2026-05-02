@@ -32,6 +32,8 @@ public:
 private:
     Seeker           m_seeker;
     std::vector<Magic::Entity> m_goals;
+    std::vector<Magic::Entity> m_boundary_walls;
+    bool m_walls_removed = false;
     // Use unique_ptr to avoid requiring the full definition in the header.
     std::unique_ptr<NavigationEnv> m_env;
     std::vector<float> m_last_obs;
@@ -45,5 +47,7 @@ private:
     bool m_loading_scene_registered = false;
     bool m_is_training = true;
     std::shared_future<void> m_python_future;
+
+    void remove_boundary_walls();
 };
 

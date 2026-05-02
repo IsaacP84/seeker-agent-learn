@@ -48,6 +48,7 @@ void NavigationEnv::bind(EntityManager &em, Entity seeker, std::vector<Entity> g
 std::vector<float> NavigationEnv::reset()
 {
     Debug::Log("NavigationEnv reset");
+    ++m_episode_count;
     m_step_count       = 0;
     m_elapsed_seconds  = 0.f;
     m_time_since_goal  = 0.f;
@@ -110,6 +111,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         body_id       = reg.get<RigidBody>(m_seeker).id;
         in_air        = reg.get<Seeker::Data>(m_seeker).in_air;
         is_jumping    = reg.get<Seeker::Data>(m_seeker).is_jumping;
+        m_in_air      = in_air;
 
         for (auto &g : m_goals)
             if (g.entity != entt::null && reg.all_of<Transform>(g.entity))
@@ -127,23 +129,18 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     Physics &physics = GetEngine().get_physics();
     JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
 
-    // Find nearest goal.
+    // Find nearest goal — cached in m_nearest_goal_idx/dist for reuse in compute_reward.
     glm::vec3 goal_pos{0.f};
-    if (!m_goals.empty())
+    m_nearest_goal_idx  = 0;
+    m_nearest_goal_dist = std::numeric_limits<float>::max();
+    for (int i = 0; i < (int)m_goals.size(); ++i)
     {
-        int nearest_idx = 0;
-        float nearest_dist = std::numeric_limits<float>::max();
-        for (int i = 0; i < (int)m_goals.size(); ++i)
-        {
-            glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
-            float d_len = glm::length(d);
-            if (d_len < nearest_dist) { nearest_dist = d_len; nearest_idx = i; }
-        }
-        goal_pos = m_goals[nearest_idx].pos;
+        glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
+        float d_len = glm::length(d);
+        if (d_len < m_nearest_goal_dist) { m_nearest_goal_dist = d_len; m_nearest_goal_idx = i; }
     }
-
-    glm::vec2 to_goal_world = {goal_pos.x - pos.x, goal_pos.z - pos.z};
-    float distance = glm::length(to_goal_world);
+    if (!m_goals.empty())
+        goal_pos = m_goals[m_nearest_goal_idx].pos;
 
     // --- Pass 1: age-and-blank (no registry needed) ---
     for (int i = 0; i < Raycast::num_rays; ++i)
@@ -188,20 +185,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     // Derive nearest-goal visibility from goal_infos (reuses already-cast rays,
     // avoids a duplicate LOS cast for the nearest goal).
-    bool goal_visible = false;
-    if (!m_goals.empty())
-    {
-        // Find nearest goal index (same logic as above).
-        int nearest_idx = 0;
-        float nearest_dist = std::numeric_limits<float>::max();
-        for (int i = 0; i < (int)m_goals.size(); ++i)
-        {
-            glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
-            float d_len = glm::length(d);
-            if (d_len < nearest_dist) { nearest_dist = d_len; nearest_idx = i; }
-        }
-        goal_visible = goal_infos[nearest_idx].visible;
-    }
+    bool goal_visible = !m_goals.empty() && goal_infos[m_nearest_goal_idx].visible;
     if (goal_visible)
     {
         m_last_known_goal_pos     = goal_pos;
@@ -440,18 +424,10 @@ float NavigationEnv::compute_reward()
         }
     }
 
-    // Find nearest goal.
-    int nearest_idx = 0;
-    float nearest_dist = std::numeric_limits<float>::max();
-    for (int i = 0; i < (int)m_goals.size(); ++i)
-    {
-        glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
-        float d_len = glm::length(d);
-        if (d_len < nearest_dist) { nearest_dist = d_len; nearest_idx = i; }
-    }
-
-    glm::vec2 to_goal = {m_goals[nearest_idx].pos.x - pos.x, m_goals[nearest_idx].pos.z - pos.z};
-    float dist = nearest_dist;
+    // Use nearest goal cached by get_observation this step.
+    int   nearest_idx  = m_nearest_goal_idx;
+    float dist         = m_nearest_goal_dist;
+    glm::vec2 to_goal  = {m_goals[nearest_idx].pos.x - pos.x, m_goals[nearest_idx].pos.z - pos.z};
 
     // Reached goal — big reward, relocate that goal, keep episode alive.
     if (dist <= Episode::goal_radius)
@@ -482,10 +458,11 @@ float NavigationEnv::compute_reward()
     }
 
     // Small shaping reward: delta distance (positive when moving closer).
-    // Skip shaping on the very first step after reset — m_prev_distance is
-    // zero until now, so the delta would be spuriously large and negative.
+    // Skip on step 1 (m_prev_distance is 0 — would produce a spurious large negative).
+    // Skip while airborne — the agent can gain positive shaping by falling toward a goal,
+    // which would make jumping off edges appear attractive.
     float shaping = 0.f;
-    if (m_step_count > 1)
+    if (m_step_count > 1 && !m_in_air)
         shaping = m_prev_distance - dist;
     m_prev_distance = dist;
 

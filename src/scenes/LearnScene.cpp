@@ -127,6 +127,23 @@ void LearnScene::onActivate()
     makeWall(em, {-14.f,  0.f, -8.f},  {0.25f,  3.f, 8.f});   // far left vertical
     makeWall(em, {14.f,   0.f,  8.f},  {0.25f,  3.f, 8.f});   // far right vertical
 
+    // Curriculum boundary walls — keep the agent from falling off early in training.
+    // Removed after Curriculum::boundary_wall_episodes resets by remove_boundary_walls().
+    if (NavigationEnv::Curriculum::boundary_wall_episodes > 0)
+    {
+        const float e  = NavigationEnv::World::max;          // 20
+        const float hw = e - NavigationEnv::World::min + 2.f; // half-width: full span + 1 unit corner overlap = 21
+        const float bh = 4.f;   // tall enough to block the seeker
+        const float bt = 0.25f; // thin
+        m_boundary_walls = {
+            makeWall(em, {0.f, 0.f, -e}, {hw, bh, bt}), // north
+            makeWall(em, {0.f, 0.f,  e}, {hw, bh, bt}), // south
+            makeWall(em, {-e, 0.f, 0.f}, {bt, bh, hw}), // west
+            makeWall(em, { e, 0.f, 0.f}, {bt, bh, hw}), // east
+        };
+    }
+    m_walls_removed = false;
+
     // ---- Goal entities ----
     m_goals.clear();
     for (int i = 0; i < NavigationEnv::Sizes::num_goals; ++i)
@@ -171,6 +188,8 @@ void LearnScene::onDeactivate()
     m_has_last_obs = false;
     m_last_obs.clear();
     m_last_action = -1;
+    m_boundary_walls.clear(); // already freed by clear() above
+    m_walls_removed = false;
 }
 
 // doesn't get called when the engine is paused
@@ -201,6 +220,10 @@ void LearnScene::update(double dt)
                 if (prev_done)
                 {
                     m_env->reset();
+
+                    // Curriculum: remove boundary walls once the agent has enough experience.
+                    if (!m_walls_removed && m_env->episode_count() >= NavigationEnv::Curriculum::boundary_wall_episodes)
+                        remove_boundary_walls();
 
                     // Random spawn position for the seeker.
                     // Goals are randomized internally by NavigationEnv::reset().
@@ -283,5 +306,40 @@ void LearnScene::handle_input(const SDL_Event &e)
     }
 
     PauseHelper::handle_input(e);
+}
+
+void LearnScene::remove_boundary_walls()
+{
+    if (m_boundary_walls.empty())
+        return;
+
+    // Collect body IDs under the registry lock, then release before calling Jolt.
+    std::vector<JPH::BodyID> body_ids;
+    {
+        auto [lock, reg] = m_entity_manager->get_registry();
+        for (Entity e : m_boundary_walls)
+            if (e != entt::null && reg.valid(e) && reg.all_of<Magic::RigidBody>(e))
+                body_ids.push_back(reg.get<Magic::RigidBody>(e).id);
+    }
+
+    Physics &physics = Magic::GetEngine().get_physics();
+    JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
+    for (const auto &id : body_ids)
+    {
+        bi.RemoveBody(id);
+        bi.DestroyBody(id);
+    }
+
+    // Destroy ECS entities.
+    {
+        auto [lock, reg] = m_entity_manager->get_registry();
+        for (Entity e : m_boundary_walls)
+            if (e != entt::null && reg.valid(e))
+                reg.destroy(e);
+    }
+
+    m_boundary_walls.clear();
+    m_walls_removed = true;
+    Debug::Log("Curriculum: boundary walls removed after episode " + std::to_string(m_env->episode_count()));
 }
 

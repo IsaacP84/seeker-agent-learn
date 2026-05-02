@@ -64,6 +64,14 @@ public:
         static constexpr float search_time_fall_rate   = 0.003f;
     };
 
+    struct Curriculum
+    {
+        // Episodes to keep boundary walls active (curriculum learning).
+        // LearnScene creates the walls; after this many resets it removes them.
+        // Set to 0 to disable the curriculum (no walls ever created).
+        static constexpr int boundary_wall_episodes = 500;
+    };
+
     struct Reward
     {
         static constexpr float fall_penalty         = -50.f;
@@ -96,6 +104,7 @@ public:
     Seeker::Action                             pending_action() const;
     std::unordered_map<std::string, float>     get_env_data() const;
     void                                       set_env_data(const std::unordered_map<std::string, float> &data);
+    int                                        episode_count() const { return m_episode_count; }
 
 private:
     Magic::EntityManager *m_em     = nullptr;
@@ -105,6 +114,10 @@ private:
     glm::vec3 m_last_known_goal_pos{0.f}; // last position where goal had line-of-sight
     float     m_time_since_goal_visible = 0.f; // seconds since goal was last in LOS
     float     m_prev_distance           = 0.f;
+    int       m_nearest_goal_idx        = 0;   // cached by get_observation, consumed by compute_reward
+    float     m_nearest_goal_dist       = 0.f;
+    bool      m_in_air                  = false; // cached by get_observation, consumed by compute_reward
+    int       m_episode_count           = 0;   // total resets; used by LearnScene for curriculum
     float     m_elapsed_seconds         = 0.f;
     float     m_time_since_goal         = 0.f;
     float     m_current_goal_time_limit = Episode::max_goal_search_seconds;
