@@ -1,10 +1,10 @@
 seeker:
   # --- PPO Rollout ---
-  # Collect 2048 steps per update regardless of episode boundaries.
-  # Matches common PPO defaults (e.g. Stable-Baselines3, CleanRL).
-  n_steps: 2048
+  # 4096 steps captures ~2 full episodes (avg ~1800 steps) per update,
+  # giving PPO more complete trajectories for advantage estimation.
+  n_steps: 4096
   n_epochs: 10
-  mini_batch_size: 64
+  mini_batch_size: 256
 
   # --- PPO Clipping ---
   clip_epsilon: 0.1
@@ -18,11 +18,16 @@ seeker:
   discount_factor_g: 0.999
 
   # --- Loss Coefficients ---
-  entropy_coeff: 0.02
-  value_loss_coeff: 0.9
+  entropy_coeff: 0.01
+  value_loss_coeff: 0.5
 
   # --- Optimiser ---
   learning_rate_a: 0.0001
+
+  # --- LR Decay ---
+  # Cosine anneal from learning_rate_a down to lr_min over lr_decay_episodes.
+  lr_min: 0.000007
+  lr_decay_episodes: 2000
 
   # --- Gradient Clipping ---
   max_grad_norm: 0.5

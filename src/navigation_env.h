@@ -76,9 +76,12 @@ public:
     {
         static constexpr float fall_penalty         = -50.f;
         static constexpr float goal_reward          = 10.f;
-        static constexpr float look_weight           = 0.01f;
+        static constexpr float look_weight           = 0.003f;
         static constexpr float action_penalty        = 0.01f;
-        static constexpr float strafe_penalty        = 0.005f;
+        static constexpr float strafe_penalty        = 0.02f;
+        static constexpr float forward_reward        = 0.002f;  // bonus per step for MOVE_FORWARD on ground
+        static constexpr float goal_speed_bonus      = 5.f;     // extra added to goal_reward if reached quickly
+        static constexpr float goal_quick_threshold  = 15.f;    // seconds — full bonus if goal reached within this
         static constexpr float max_speed             = 10.f;   // normalisation divisor for linear velocity inputs
         static constexpr float max_angular_speed     = 10.f;   // normalisation divisor for angular velocity input (rad/s)
         static constexpr float edge_danger_dist      = 3.f;    // world units from map boundary where penalty begins

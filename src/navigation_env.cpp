@@ -452,6 +452,10 @@ float NavigationEnv::compute_reward()
             new_nearest = std::min(new_nearest, glm::length(d));
         }
         m_prev_distance   = new_nearest;
+        // Speed bonus: full bonus if reached within quick_threshold, linear ramp to 0 beyond it.
+        float speed_bonus = Reward::goal_speed_bonus
+            * std::max(0.f, 1.f - m_time_since_goal / Reward::goal_quick_threshold);
+
         m_time_since_goal = 0.f;
 
         // Invalidate sightings after goal relocation.
@@ -460,7 +464,7 @@ float NavigationEnv::compute_reward()
                 sg = Sighting{};
         m_sight_head.fill(0);
 
-        return Reward::goal_reward;
+        return Reward::goal_reward + speed_bonus;
     }
 
     // Small shaping reward: delta distance (positive when moving closer).
@@ -477,6 +481,7 @@ float NavigationEnv::compute_reward()
     float angle_diff = goal_world_angle - looking_angle;
     float look_alignment = std::cos(glm::radians(angle_diff));
     float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? Reward::strafe_penalty : 0.f;
+    float fwd_bonus   = (pending_action() == Seeker::MOVE_FORWARD && !m_in_air) ? Reward::forward_reward : 0.f;
 
     // Stuck penalty: if the agent is trying to move but barely going anywhere,
     // it's probably wedged against a wall. Penalise to encourage going around.
@@ -489,7 +494,7 @@ float NavigationEnv::compute_reward()
             stuck_pen = -Reward::stuck_penalty;
     }
 
-    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty + stuck_pen;
+    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty + stuck_pen + fwd_bonus;
 }
 
 bool NavigationEnv::is_done() const

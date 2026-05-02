@@ -93,6 +93,8 @@ class Agent:
         self.learning_rate_a   = hyperparameters["learning_rate_a"]
         self.max_grad_norm     = hyperparameters["max_grad_norm"]
         self.stop_on_reward    = hyperparameters.get("stop_on_reward", 999999)
+        self.lr_min            = hyperparameters.get("lr_min", self.learning_rate_a)
+        self.lr_decay_episodes = hyperparameters.get("lr_decay_episodes", 0)
 
         raw_hidden = hyperparameters.get("hidden_dims", 256)
         if isinstance(raw_hidden, int):
@@ -119,6 +121,15 @@ class Agent:
             list(self.actor.parameters()) + list(self.critic.parameters()),
             lr=self.learning_rate_a,
         )
+
+        if self.lr_decay_episodes > 0:
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=self.lr_decay_episodes,
+                eta_min=self.lr_min,
+            )
+        else:
+            self.scheduler = None
 
         self.buffer = RolloutBuffer(self.n_steps, device=device)
 
@@ -210,6 +221,8 @@ class Agent:
                     if is_training:
                         if 'optimizer' in checkpoint:
                             self.optimizer.load_state_dict(checkpoint['optimizer'])
+                        if 'scheduler' in checkpoint and self.scheduler is not None:
+                            self.scheduler.load_state_dict(checkpoint['scheduler'])
                         for key in ('rewards_per_episode', 'goal_time_limit_history',
                                     'action_dist_history', 'pg_loss_history',
                                     'value_loss_history', 'entropy_history',
@@ -372,6 +385,9 @@ class Agent:
             self._gradient_norms       = []
             self._obs_stats_samples    = []
 
+            if self.scheduler is not None:
+                self.scheduler.step()
+
             if episode % 10 == 0:
                 self.save_graph()
                 self._save_checkpoint()
@@ -438,6 +454,7 @@ class Agent:
             'actor':                  self.actor.state_dict(),
             'critic':                 self.critic.state_dict(),
             'optimizer':              self.optimizer.state_dict(),
+            **({'scheduler': self.scheduler.state_dict()} if self.scheduler is not None else {}),
             'rewards_per_episode':    self.rewards_per_episode,
             'goal_time_limit_history':self.goal_time_limit_history,
             'action_dist_history':    self.action_dist_history,
