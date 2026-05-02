@@ -7,6 +7,7 @@ set INSTALL_DIR=%~dp0install-release
 if not exist "%BUILD_DIR%\CMakeCache.txt" (
     cmake -S . -B "%BUILD_DIR%" -G "Ninja" ^
       -DCMAKE_BUILD_TYPE=Release ^
+      -DCMAKE_INSTALL_MESSAGE=LAZY ^
       -DMagic_DIR="%~dp0engine/lib/cmake/Magic" ^
       -DPython3_ROOT_DIR=C:/Github/magic-engine/python ^
       -DPython3_EXECUTABLE=C:/Github/magic-engine/python/python.exe
