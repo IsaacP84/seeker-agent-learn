@@ -1,7 +1,6 @@
 import json
 import os
-import random
-from learning.agent import Agent
+from learning.agent_ppo import Agent
 from Magic import ASSETS_FOLDER
 from Magic import NavigationEnv as env
 

@@ -155,6 +155,9 @@ struct SeekerUpdateHandler
                 case Seeker::TURN_RIGHT:
                     data.looking_angle -= data.turn_speed * (float)dt;
                     break;
+                case Seeker::JUMP:
+                        data.jumped = true;
+                    break;
                 default:
                     break;
                 }

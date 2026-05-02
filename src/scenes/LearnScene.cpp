@@ -206,7 +206,8 @@ void LearnScene::update(double dt)
                     // Goals are randomized internally by NavigationEnv::reset().
                     static std::mt19937 rng{std::random_device{}()};
                     static std::uniform_real_distribution<float> dist(
-                        NavigationEnv::World::min * 0.8f, NavigationEnv::World::max * 0.8f);
+                        NavigationEnv::World::min * NavigationEnv::World::spawn_margin,
+                        NavigationEnv::World::max * NavigationEnv::World::spawn_margin);
 
                     float sx = dist(rng), sz = dist(rng);
 

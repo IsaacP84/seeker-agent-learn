@@ -1,0 +1,153 @@
+import torch
+import numpy as np
+
+
+class RolloutBuffer:
+    """Fixed-size on-policy rollout buffer for PPO.
+
+    Accumulates transitions step-by-step. When full (or when the caller
+    signals end-of-episode with ``flush=True``), ``compute_advantages``
+    is called to produce GAE-Lambda advantages and discounted returns,
+    then ``get_batches`` yields shuffled mini-batches for the PPO update.
+
+    Parameters
+    ----------
+    n_steps  : int   Maximum number of steps before forcing an update.
+    device   : str   Torch device string ('cpu' or 'cuda').
+    """
+
+    def __init__(self, n_steps, device='cpu'):
+        self.n_steps = n_steps
+        self.device = device
+        self._ptr = 0
+        self._size = 0
+
+        # Storage — pre-allocated after the first ``add`` call so we don't
+        # need state_dim at construction time.
+        self._obs = None
+        self._actions = None
+        self._rewards = None
+        self._dones = None
+        self._log_probs = None
+        self._values = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def add(self, obs, action, reward, done, log_prob, value):
+        """Store a single transition.
+
+        Parameters
+        ----------
+        obs      : array-like (state_dim,)
+        action   : int
+        reward   : float
+        done     : bool  — True if the episode ended on this step
+        log_prob : float — log π(a|s) at collection time
+        value    : float — V(s) at collection time
+        """
+        if self._obs is None:
+            state_dim = len(obs)
+            self._obs      = torch.zeros((self.n_steps, state_dim), dtype=torch.float32, device=self.device)
+            self._actions  = torch.zeros(self.n_steps, dtype=torch.long,    device=self.device)
+            self._rewards  = torch.zeros(self.n_steps, dtype=torch.float32, device=self.device)
+            self._dones    = torch.zeros(self.n_steps, dtype=torch.float32, device=self.device)
+            self._log_probs= torch.zeros(self.n_steps, dtype=torch.float32, device=self.device)
+            self._values   = torch.zeros(self.n_steps, dtype=torch.float32, device=self.device)
+
+        i = self._ptr
+        self._obs[i]       = torch.as_tensor(obs,      dtype=torch.float32, device=self.device)
+        self._actions[i]   = int(action)
+        self._rewards[i]   = float(reward)
+        self._dones[i]     = float(done)
+        self._log_probs[i] = float(log_prob)
+        self._values[i]    = float(value)
+
+        self._ptr  = (self._ptr + 1) % self.n_steps
+        self._size = min(self._size + 1, self.n_steps)
+
+    def is_full(self):
+        return self._size >= self.n_steps
+
+    def clear(self):
+        self._ptr  = 0
+        self._size = 0
+
+    def compute_advantages(self, last_value, gamma, gae_lambda):
+        """Compute GAE-Lambda advantages and discounted returns.
+
+        Parameters
+        ----------
+        last_value : float  V(s_{t+1}) for the step *after* the buffer ends.
+                            Pass 0.0 when the episode ended with a terminal
+                            state (e.g. fell off map); pass critic(next_obs)
+                            when the episode was truncated by a step/time limit.
+        gamma      : float  Discount factor (e.g. 0.999).
+        gae_lambda : float  GAE smoothing (e.g. 0.95).
+
+        Returns
+        -------
+        advantages : Tensor (n,)
+        returns    : Tensor (n,)  — targets for the value function
+        """
+        n = self._size
+        advantages = torch.zeros(n, dtype=torch.float32, device=self.device)
+
+        gae = 0.0
+        next_val = float(last_value)
+
+        for t in reversed(range(n)):
+            # If this step ended an episode the *next* value is 0 (true terminal).
+            next_non_terminal = 1.0 - self._dones[t].item()
+            delta = (self._rewards[t].item()
+                     + gamma * next_val * next_non_terminal
+                     - self._values[t].item())
+            gae = delta + gamma * gae_lambda * next_non_terminal * gae
+            advantages[t] = gae
+            next_val = self._values[t].item()
+
+        returns = advantages + self._values[:n]
+        return advantages, returns
+
+    def get_batches(self, mini_batch_size):
+        """Yield shuffled mini-batches of the current rollout.
+
+        Yields
+        ------
+        dict with keys: obs, actions, log_probs, values, advantages, returns
+        Each value is a Tensor of shape (mini_batch_size, ...) — the last
+        batch may be smaller if n is not divisible.
+        """
+        n = self._size
+        indices = torch.randperm(n, device=self.device)
+
+        # These are passed in from compute_advantages; store on the object
+        # temporarily so get_batches can access them.
+        adv = self._advantages
+        ret = self._returns
+
+        for start in range(0, n, mini_batch_size):
+            idx = indices[start: start + mini_batch_size]
+            yield {
+                'obs':       self._obs[:n][idx],
+                'actions':   self._actions[:n][idx],
+                'log_probs': self._log_probs[:n][idx],
+                'values':    self._values[:n][idx],
+                'advantages':adv[idx],
+                'returns':   ret[idx],
+            }
+
+    def prepare(self, last_value, gamma, gae_lambda):
+        """Compute advantages/returns and store them ready for ``get_batches``.
+
+        Call this once before iterating ``get_batches``.
+
+        Returns
+        -------
+        advantages, returns  (also stored internally)
+        """
+        adv, ret = self.compute_advantages(last_value, gamma, gae_lambda)
+        self._advantages = adv
+        self._returns    = ret
+        return adv, ret

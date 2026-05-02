@@ -23,8 +23,8 @@ class NavigationEnv
 public:
     struct Sizes
     {
-        static constexpr int num_states = 199;
-        static constexpr int num_actions = 6;
+        static constexpr int num_states = 209;
+        static constexpr int num_actions = 7;
         static constexpr int num_goals   = 3;
     };
 
@@ -39,9 +39,11 @@ public:
 
     struct SightingConstants
     {
-        static constexpr int   history   = 3;
-        static constexpr float max_age   = 5.0f;
-        static constexpr float max_stale = 5.0f;
+        static constexpr int   history      = 3;
+        static constexpr float max_age      = 5.0f;
+        static constexpr float max_stale    = 5.0f;
+        static constexpr float wall_interest = -0.1f; // sighting interest for a wall hit
+        static constexpr float goal_interest =  0.9f; // sighting interest for a visible goal
     };
 
     struct World
@@ -49,6 +51,7 @@ public:
         static constexpr float min             = -20.0f;
         static constexpr float max             = 20.0f;
         static constexpr float death_height    = -10.f;
+        static constexpr float spawn_margin    = 0.8f;   // fraction of world bounds used for goal spawn
     };
 
     struct Episode
@@ -63,10 +66,15 @@ public:
 
     struct Reward
     {
-        static constexpr float fall_penalty   = -400.f;
-        static constexpr float look_weight    = 0.01f;
-        static constexpr float action_penalty  = 0.01f;
-        static constexpr float strafe_penalty = 0.005f;
+        static constexpr float fall_penalty         = -50.f;
+        static constexpr float goal_reward          = 10.f;
+        static constexpr float look_weight           = 0.01f;
+        static constexpr float action_penalty        = 0.01f;
+        static constexpr float strafe_penalty        = 0.005f;
+        static constexpr float max_speed             = 10.f;   // normalisation divisor for linear velocity inputs
+        static constexpr float max_angular_speed     = 10.f;   // normalisation divisor for angular velocity input (rad/s)
+        static constexpr float edge_danger_dist      = 3.f;    // world units from map boundary where penalty begins
+        static constexpr float edge_danger_penalty   = 0.3f;   // max penalty per step at the boundary itself
     };
 
     struct Angles
@@ -103,6 +111,7 @@ private:
     bool      m_done             = false;
     int       m_step_count      = 0;
     int       m_pending_action  = 0;
+    int       m_prev_action     = -1; // -1 = no previous action (start of episode)
 
     struct Sighting
     {

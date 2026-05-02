@@ -53,6 +53,7 @@ std::vector<float> NavigationEnv::reset()
     m_time_since_goal  = 0.f;
     m_done             = false;
     m_pending_action   = 0;
+    m_prev_action      = -1;
 
     m_current_goal_time_limit = std::max(Episode::min_goal_search_seconds,
                                          m_current_goal_time_limit - Episode::search_time_fall_rate);
@@ -68,7 +69,7 @@ std::vector<float> NavigationEnv::reset()
     if (m_em && !m_goals.empty())
     {
         auto [lock, reg] = m_em->get_registry();
-        std::uniform_real_distribution<float> rdist(World::min * 0.8f, World::max * 0.8f);
+        std::uniform_real_distribution<float> rdist(World::min * World::spawn_margin, World::max * World::spawn_margin);
         for (auto &g : m_goals)
         {
             g.pos.x = rdist(m_rng);
@@ -97,14 +98,18 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     glm::vec3 pos;
     float looking_angle;
     JPH::BodyID body_id;
+    bool in_air;
+    bool is_jumping;
     {
         auto [lock, reg] = ((const EntityManager&)*m_em).get_registry();
         if (!reg.all_of<Transform, Seeker::Data, RigidBody>(m_seeker))
             return obs;
 
-        pos          = reg.get<Transform>(m_seeker).pos;
+        pos           = reg.get<Transform>(m_seeker).pos;
         looking_angle = reg.get<Seeker::Data>(m_seeker).looking_angle;
-        body_id      = reg.get<RigidBody>(m_seeker).id;
+        body_id       = reg.get<RigidBody>(m_seeker).id;
+        in_air        = reg.get<Seeker::Data>(m_seeker).in_air;
+        is_jumping    = reg.get<Seeker::Data>(m_seeker).is_jumping;
 
         for (auto &g : m_goals)
             if (g.entity != entt::null && reg.all_of<Transform>(g.entity))
@@ -139,7 +144,6 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     glm::vec2 to_goal_world = {goal_pos.x - pos.x, goal_pos.z - pos.z};
     float distance = glm::length(to_goal_world);
-    m_prev_distance = distance;
 
     // --- Pass 1: age-and-blank (no registry needed) ---
     for (int i = 0; i < Raycast::num_rays; ++i)
@@ -155,28 +159,8 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         }
     }
 
-    // --- LOS check: ray from seeker straight to goal position ---
-    // If anything (wall) is hit before we reach the goal, the goal is occluded.
+    // --- LOS check + goal info: one ray per goal, derive nearest-goal visibility from results ---
     NavIgnoreSelfFilter self_filter(body_id);
-    bool goal_visible = false;
-    {
-        JPH::Vec3 los_dir(to_goal_world.x, 0.f, to_goal_world.y);
-        JPH::RRayCast los_ray{JPH::Vec3(pos.x, pos.y, pos.z), los_dir};
-        JPH::RayCastResult los_hit;
-        goal_visible = !physics.physics_system.GetNarrowPhaseQuery()
-                           .CastRay(los_ray, los_hit, {}, {}, self_filter);
-    }
-    if (goal_visible)
-    {
-        m_last_known_goal_pos     = goal_pos;
-        m_time_since_goal_visible = 0.f;
-    }
-    else
-    {
-        m_time_since_goal_visible += dt;
-    }
-
-    // --- Precompute goal visibility + bearing (one LOS cast per goal) ---
     struct GoalInfo
     {
         bool              visible;
@@ -200,6 +184,32 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             {to_g.x, m_goals[gi].pos.y - pos.y, to_g.y},
             gi
         });
+    }
+
+    // Derive nearest-goal visibility from goal_infos (reuses already-cast rays,
+    // avoids a duplicate LOS cast for the nearest goal).
+    bool goal_visible = false;
+    if (!m_goals.empty())
+    {
+        // Find nearest goal index (same logic as above).
+        int nearest_idx = 0;
+        float nearest_dist = std::numeric_limits<float>::max();
+        for (int i = 0; i < (int)m_goals.size(); ++i)
+        {
+            glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
+            float d_len = glm::length(d);
+            if (d_len < nearest_dist) { nearest_dist = d_len; nearest_idx = i; }
+        }
+        goal_visible = goal_infos[nearest_idx].visible;
+    }
+    if (goal_visible)
+    {
+        m_last_known_goal_pos     = goal_pos;
+        m_time_since_goal_visible = 0.f;
+    }
+    else
+    {
+        m_time_since_goal_visible += dt;
     }
 
     // --- Pass 2: raycast + record + build obs (registry lock not held) ---
@@ -252,7 +262,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
                 dir.GetX() * hit.mFraction,
                 dir.GetY() * hit.mFraction,
                 dir.GetZ() * hit.mFraction};
-            write_sighting(hit_offset, hit.mBodyID, -0.1f);
+            write_sighting(hit_offset, hit.mBodyID, SightingConstants::wall_interest);
         }
 
         // Record goal sightings (interest = 0.9) for any visible goal whose
@@ -265,7 +275,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             float diff = std::abs(gi.bearing - angle_deg);
             if (diff > Angles::half_circle_deg) diff = Angles::full_circle_deg - diff;
             if (diff <= SPREAD * 0.5f)
-                write_sighting(gi.offset, gi.body_id, 0.9f);
+                write_sighting(gi.offset, gi.body_id, SightingConstants::goal_interest);
         }
 
         // Section B — interest of the most significant sighting this frame.
@@ -285,7 +295,28 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         }
     }
 
-    // --- Section E (indices 182–186): ground / edge-detection rays ---
+    // Observation layout — derived from structure constants so indices
+    // stay in sync automatically if any section size changes.
+    constexpr int section_E_base   = Raycast::num_rays * 2 + Raycast::num_rays * SightingConstants::history * 4;
+    constexpr int section_D_base   = section_E_base + Raycast::num_ground_rays;
+    constexpr int idx_goal_dir_x   = section_D_base + 0;
+    constexpr int idx_goal_dir_z   = section_D_base + 1;
+    constexpr int idx_vel_x        = section_D_base + 2;
+    constexpr int idx_vel_z        = section_D_base + 3;
+    constexpr int idx_vel_y        = section_D_base + 4;
+    constexpr int idx_ang_vel_y    = section_D_base + 5;
+    constexpr int idx_angle_sin    = section_D_base + 6;
+    constexpr int idx_angle_cos    = section_D_base + 7;
+    constexpr int idx_goal_dist    = section_D_base + 8;
+    constexpr int idx_last_known_x = section_D_base + 9;
+    constexpr int idx_last_known_z = section_D_base + 10;
+    constexpr int idx_goal_visible = section_D_base + 11;
+    constexpr int idx_staleness    = section_D_base + 12;
+    constexpr int idx_in_air       = section_D_base + 13;
+    constexpr int idx_is_jumping   = section_D_base + 14;
+    constexpr int idx_prev_action  = section_D_base + 15;
+
+    // --- Section E: ground / edge-detection rays (section_E_base … section_E_base + num_ground_rays - 1) ---
     // NUM_GROUND_RAYS downward-pitched rays spanning the forward 120° FOV.
     // 1.0 = no ground hit within RAY_LEN = edge of map nearby.
     {
@@ -305,14 +336,14 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             JPH::RayCastResult hit;
             bool had_hit = physics.physics_system.GetNarrowPhaseQuery()
                                .CastRay(ray, hit, {}, {}, self_filter);
-            obs[182 + i] = had_hit ? hit.mFraction : 1.0f;
+            obs[section_E_base + i] = had_hit ? hit.mFraction : 1.0f;
         }
     }
 
-    // --- Section D (indices 187–198) ---
+    // --- Section D (section_D_base … section_D_base + num_actions + 12) ---
     const float diag = std::sqrt(2.f) * (World::max - World::min);
 
-    // 187–188: normalised direction to LAST KNOWN goal in seeker-local space.
+    // idx_goal_dir_x/z: normalised direction to LAST KNOWN goal in seeker-local space.
     // Uses m_last_known_goal_pos so the agent retains a search target when
     // the goal is behind a wall. Updated to m_goal_pos whenever goal is visible.
     // Seeker forward = {sin(a), 0, cos(a)}, right = {cos(a), 0, -sin(a)}.
@@ -326,38 +357,42 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         cos_l * to_last_known.x - sin_l * to_last_known.y,
         sin_l * to_last_known.x + cos_l * to_last_known.y};
     float local_len = std::max(glm::length(local_goal), 1e-6f);
-    obs[187] = local_goal.x / local_len;
-    obs[188] = local_goal.y / local_len;
+    obs[idx_goal_dir_x] = local_goal.x / local_len;
+    obs[idx_goal_dir_z] = local_goal.y / local_len;
 
-    // 189–190: seeker linear velocity (xz).
+    // idx_vel_x/z/y, idx_ang_vel_y: seeker velocity, normalised by max_speed / max_angular_speed.
     JPH::Vec3 vel = bi.GetLinearVelocity(body_id);
-    obs[189] = vel.GetX();
-    obs[190] = vel.GetZ();
+    obs[idx_vel_x]     = vel.GetX() / Reward::max_speed;
+    obs[idx_vel_z]     = vel.GetZ() / Reward::max_speed;
+    obs[idx_vel_y]     = vel.GetY() / Reward::max_speed;
+    obs[idx_ang_vel_y] = bi.GetAngularVelocity(body_id).GetY() / Reward::max_angular_speed;
 
-    // 191: looking angle normalised to [-1, 1].
-    {
-        float norm_angle = std::fmod(looking_angle, Angles::full_circle_deg);
-        if (norm_angle < 0.f) norm_angle += Angles::full_circle_deg;
-        obs[191] = norm_angle / Angles::half_circle_deg - 1.f;
-    }
+    // idx_angle_sin/cos: looking angle encoded as (sin, cos) to avoid the ±180° discontinuity.
+    obs[idx_angle_sin] = std::sin(look_rad);
+    obs[idx_angle_cos] = std::cos(look_rad);
 
-    // 192: distance to last known goal, normalised.
-    obs[192] = std::min(last_known_dist / diag, 1.f);
+    // idx_goal_dist: distance to last known goal, normalised.
+    obs[idx_goal_dist] = std::min(last_known_dist / diag, 1.f);
 
-    // 193–194: seeker world position normalised.
-    obs[193] = (pos.x - World::min) / (World::max - World::min);
-    obs[194] = (pos.z - World::min) / (World::max - World::min);
+    // idx_last_known_x/z: last known goal world position normalised.
+    obs[idx_last_known_x] = (m_last_known_goal_pos.x - World::min) / (World::max - World::min);
+    obs[idx_last_known_z] = (m_last_known_goal_pos.z - World::min) / (World::max - World::min);
 
-    // 195–196: last known goal world position normalised.
-    obs[195] = (m_last_known_goal_pos.x - World::min) / (World::max - World::min);
-    obs[196] = (m_last_known_goal_pos.z - World::min) / (World::max - World::min);
+    // idx_goal_visible: goal currently visible (1.0 = yes, 0.0 = occluded by wall).
+    obs[idx_goal_visible] = goal_visible ? 1.f : 0.f;
 
-    // 197: goal currently visible (1.0 = yes, 0.0 = occluded by wall).
-    obs[197] = goal_visible ? 1.f : 0.f;
+    // idx_staleness: staleness of last known position, normalised [0, 1] over max_stale seconds.
+    //      0 = just saw it, 1 = not seen for max_stale+ seconds.
+    obs[idx_staleness] = std::min(m_time_since_goal_visible / SightingConstants::max_stale, 1.f);
 
-    // 198: staleness of last known position, normalised [0, 1] over 5 s.
-    //      0 = just saw it, 1 = not seen for 5+ seconds.
-    obs[198] = std::min(m_time_since_goal_visible / SightingConstants::max_stale, 1.f);
+    // idx_in_air / idx_is_jumping: binary flags so the agent knows when JUMP is valid.
+    obs[idx_in_air]     = in_air     ? 1.f : 0.f;
+    obs[idx_is_jumping] = is_jumping ? 1.f : 0.f;
+
+    // idx_prev_action + action index: previous action one-hot (num_actions floats).
+    // All zeros at the start of an episode (m_prev_action == -1).
+    if (m_prev_action >= 0 && m_prev_action < Sizes::num_actions)
+        obs[idx_prev_action + m_prev_action] = 1.f;
 
     return obs;
 }
@@ -377,10 +412,33 @@ float NavigationEnv::compute_reward()
         looking_angle = reg.get<Seeker::Data>(m_seeker).looking_angle;
 
     // Fell off the map — heavy penalty so the agent strongly avoids the edges.
+    // Subtract the action penalty for all remaining steps so that falling early
+    // is never cheaper than falling late: early termination forfeits potential
+    // goal rewards AND is penalised for the steps it won't take.
     if (pos.y < World::death_height)
-        return Reward::fall_penalty;
+    {
+        int remaining = Episode::max_steps - m_step_count;
+        return Reward::fall_penalty - static_cast<float>(remaining) * Reward::action_penalty;
+    }
 
-    // TODO: edge danger penalty
+    // Edge danger penalty: linear ramp from 0 at edge_danger_dist to
+    // edge_danger_penalty at the boundary, applied every step the agent
+    // is in the danger zone. Stacks with shaping rewards so the agent
+    // is still incentivised to reach goals near the edge.
+    float edge_penalty = 0.f;
+    {
+        float dist_to_edge = std::min({
+            pos.x - World::min,
+            World::max - pos.x,
+            pos.z - World::min,
+            World::max - pos.z
+        });
+        if (dist_to_edge < Reward::edge_danger_dist)
+        {
+            float t = 1.f - dist_to_edge / Reward::edge_danger_dist; // 0 at threshold, 1 at boundary
+            edge_penalty = -Reward::edge_danger_penalty * t;
+        }
+    }
 
     // Find nearest goal.
     int nearest_idx = 0;
@@ -398,7 +456,7 @@ float NavigationEnv::compute_reward()
     // Reached goal — big reward, relocate that goal, keep episode alive.
     if (dist <= Episode::goal_radius)
     {
-        std::uniform_real_distribution<float> rdist(World::min * 0.8f, World::max * 0.8f);
+        std::uniform_real_distribution<float> rdist(World::min * World::spawn_margin, World::max * World::spawn_margin);
         m_goals[nearest_idx].pos.x = rdist(m_rng);
         m_goals[nearest_idx].pos.z = rdist(m_rng);
         if (m_goals[nearest_idx].entity != entt::null && reg.all_of<Transform>(m_goals[nearest_idx].entity))
@@ -420,22 +478,24 @@ float NavigationEnv::compute_reward()
                 sg = Sighting{};
         m_sight_head.fill(0);
 
-        return 10.f;
+        return Reward::goal_reward;
     }
 
-    // TODO: add a penalty for early episode termination (e.g. falling off the map) to encourage the agent to learn to avoid that.
-
     // Small shaping reward: delta distance (positive when moving closer).
-    float shaping = m_prev_distance - dist;
+    // Skip shaping on the very first step after reset — m_prev_distance is
+    // zero until now, so the delta would be spuriously large and negative.
+    float shaping = 0.f;
+    if (m_step_count > 1)
+        shaping = m_prev_distance - dist;
     m_prev_distance = dist;
 
     // Look-at reward: cos(angle between facing direction and bearing to goal).
     float goal_world_angle = glm::degrees(std::atan2(to_goal.x, to_goal.y));
     float angle_diff = goal_world_angle - looking_angle;
     float look_alignment = std::cos(glm::radians(angle_diff));
-    float strafe_pen = (m_pending_action == 2 || m_pending_action == 3) ? Reward::strafe_penalty : 0.f;
+    float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? Reward::strafe_penalty : 0.f;
 
-    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen;
+    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty;
 }
 
 bool NavigationEnv::is_done() const
@@ -448,6 +508,7 @@ bool NavigationEnv::is_done() const
 
 void NavigationEnv::apply_action(int action)
 {
+    m_prev_action    = m_pending_action;
     m_pending_action = action;
     ++m_step_count;
 }
@@ -486,6 +547,8 @@ Seeker::Action NavigationEnv::pending_action() const
         return Seeker::TURN_LEFT;
     case 5:
         return Seeker::TURN_RIGHT;
+    case 6:
+        return Seeker::JUMP;
     default:
         return Seeker::NONE;
     }

@@ -1,41 +1,125 @@
-# Seeker DQN — Hyperparameters & Training Timeline
+# Seeker PPO — Hyperparameters & Training Timeline
+
+## Algorithm: Proximal Policy Optimization (PPO)
+
+DQN has been replaced with PPO. The C++↔Python interface (`step(obs) → int`, `feedback(prev_obs, action, reward, done, next_obs)`) is unchanged. The agent now uses separate Actor and Critic networks trained on fixed-length rollouts with GAE-Lambda advantage estimation.
+
+**Key files:**
+- `assets/scripts/learning/agent.py` — Agent class (PPO training loop)
+- `assets/scripts/learning/ppo_network.py` — Actor and Critic network definitions
+- `assets/scripts/learning/trajectory_buffer.py` — On-policy rollout buffer with GAE
+- DQN backups: `agent_dqn.py`, `dqn_backup.py`, `experience_replay_dqn.py`
+
+---
 
 ## Hyperparameters (seeker set)
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| `replay_memory_size` | 150,000 | Fills in ~30 episodes; keeps experience fresh without waiting 90 episodes for diversity |
-| `mini_batch_size` | 64 | More update steps per episode; better for sparse goal rewards |
-| `epsilon_init` | 1.0 | Full exploration at start |
-| `epsilon_decay` | 0.99998 | ~115k steps to floor |
-| `epsilon_limit` | 0.1 | 10% random action floor to prevent total exploitation |
-| `learning_rate_a` | 0.0003 | Adam's commonly optimal range; faster early learning without diverging |
-| `discount_factor_g` | 0.999 | `0.99^300 ≈ 0.05` (goal credit dies); `0.999^300 ≈ 0.74` — agent can plan across the full search window |
+| `n_steps` | 2,048 | Rollout length before each PPO update; matches common PPO defaults |
+| `n_epochs` | 10 | Number of passes over each rollout batch |
+| `mini_batch_size` | 64 | Mini-batch size within each epoch |
+| `clip_epsilon` | 0.2 | PPO clipping range; standard value |
+| `gae_lambda` | 0.95 | GAE smoothing — balances bias vs. variance in advantage estimates |
+| `discount_factor_g` | 0.999 | `0.999^900 ≈ 0.41` — agent retains meaningful credit across the full 30 s search window |
+| `entropy_coeff` | 0.01 | Entropy bonus weight; keeps exploration alive without dominating the loss |
+| `value_loss_coeff` | 0.5 | Critic loss weight relative to actor loss |
+| `learning_rate_a` | 0.0003 | Single Adam optimizer over Actor + Critic parameters |
+| `max_grad_norm` | 0.5 | Gradient clipping threshold |
 | `stop_on_reward` | 999,999 | Multi-goal episodes can score 200+ when trained; don't stop prematurely |
-| `hidden_dims` | [256, 256, 128] | Sufficient capacity for 199 inputs (raycast + ground rays + sighting history + positional + LOS features) |
+| `hidden_dims` | [256, 256, 128] | Both Actor and Critic use separate MLPs with this architecture |
 
 ---
 
-## Observation Space Summary (199 floats)
+## Network Architecture
+
+Both Actor and Critic are **separate** MLPs (no shared trunk):
+
+```
+Input (209) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(128) → ReLU → head
+```
+
+- **Actor head:** Linear(128 → 7) → Categorical distribution over 7 actions
+- **Critic head:** Linear(128 → 1) → scalar value estimate V(s)
+- Single shared Adam optimizer over both networks' parameters
+
+---
+
+## Training Loop
+
+Each C++ physics step calls `step(obs)` then `feedback(...)` once. Internally:
+
+1. `step()` samples from the Actor (stochastic in training, greedy in inference) and caches `log_prob` and `V(s)` for the next `observe()` call.
+2. `observe()` appends the transition to the `RolloutBuffer`. When the buffer has accumulated **2,048 steps**:
+   - Bootstrap the last value with `V(next_state)` from the Critic
+   - Compute GAE-Lambda advantages and discounted returns over the full rollout
+   - Normalize advantages (zero mean, unit std)
+   - Run **10 epochs** of mini-batch PPO updates (64-step batches, randomly shuffled each epoch)
+   - Clipped surrogate loss + value loss + entropy bonus
+   - Clip gradient norm to 0.5
+   - Clear the buffer
+3. On episode end (done=True), any partial buffer is also flushed with `last_value=0`.
+
+---
+
+## Checkpoint Format
+
+Checkpoints (`runs/seeker.pt`) contain:
+- `actor`, `critic` — network state dicts
+- `optimizer` — Adam state (momentum, lr)
+- All diagnostic histories: `rewards_per_episode`, `pg_loss_history`, `value_loss_history`, `entropy_history`, `clip_frac_history`, `approx_kl_history`, `episode_length_history`, `gradient_norm_history`, `goal_reach_history`, `goal_time_limit_history`, `action_dist_history`
+- `env_data` — curriculum state (current goal time limit)
+
+On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detected and skipped gracefully, starting fresh.
+
+---
 
 | Indices | Content |
 |---|---|
 | 0–12 | Ray hit fractions (13 horizontal rays, 120° FOV, 10° spacing) |
-| 13–25 | Interest bias toward goal per ray (cosine alignment; zeroed when goal occluded by wall) |
-| 26–181 | Sighting ring buffer: 13 rays × 3 history × (offset_x, offset_y, offset_z, age) |
+| 13–25 | Sighting interest per ray: −0.1 = wall hit this frame, 0.9 = goal visible on this ray, 0.0 = nothing |
+| 26–181 | Sighting ring buffer: 13 rays × 3 history × (offset_x, offset_y, offset_z, age/max_age) = 156 floats |
 | 182–186 | Ground / edge-detection ray fractions (5 rays, 45° downward pitch, 120° FOV) — 1.0 = no ground = edge ahead |
 | 187–188 | Last-known goal direction in seeker-local space (normalised; holds last seen position when occluded) |
-| 189–190 | Seeker linear velocity (xz) |
-| 191 | Looking angle normalised to [−1, 1] |
-| 192 | Distance to last-known goal normalised |
-| 193–194 | Seeker world position normalised |
-| 195–196 | Last-known goal world position normalised |
-| 197 | Goal currently visible: 1.0 = clear LOS, 0.0 = occluded by wall |
-| 198 | Goal sighting staleness normalised [0, 1] over 5 s — 0 = just seen, 1 = not seen for 5+ s |
+| 189 | Seeker linear velocity X, normalised by max_speed (10 m/s) |
+| 190 | Seeker linear velocity Z, normalised by max_speed |
+| 191 | Seeker linear velocity Y, normalised by max_speed |
+| 192 | Seeker angular velocity Y (yaw rate), normalised by max_angular_speed (10 rad/s) |
+| 193 | sin(looking_angle) — encodes heading without ±180° discontinuity |
+| 194 | cos(looking_angle) |
+| 195 | Distance to last-known goal, normalised by map diagonal |
+| 196–197 | Last-known goal world position (x, z), normalised to [0, 1] |
+| 198 | Goal currently visible: 1.0 = clear LOS, 0.0 = occluded by wall |
+| 199 | Goal sighting staleness normalised [0, 1] over 5 s — 0 = just seen, 1 = not seen for 5+ s |
+| 200 | `in_air` flag (1.0 = airborne, 0.0 = grounded) |
+| 201 | `is_jumping` flag (1.0 = jump impulse active) |
+| 202–208 | Previous action one-hot (7 actions; all zero at episode start) |
+
+**Actions (7):**
+
+| Index | Action |
+|---|---|
+| 0 | MOVE_FORWARD |
+| 1 | MOVE_BACKWARD |
+| 2 | STRAFE_LEFT |
+| 3 | STRAFE_RIGHT |
+| 4 | TURN_LEFT |
+| 5 | TURN_RIGHT |
+| 6 | JUMP |
 
 ---
 
-## Episode Termination Conditions
+## Reward Function
+
+| Signal | Value | Notes |
+|---|---|---|
+| Goal reached | +10.0 | Goal relocates randomly; episode continues |
+| Delta distance | shaping | `prev_dist − curr_dist` per step; positive when moving closer |
+| Look alignment | +0.01 × cos(angle_diff) | Encourages facing the goal |
+| Action penalty | −0.01 / step | Constant cost; incentivises efficient routes |
+| Strafe penalty | −0.005 / step | Applied on top of action penalty when strafing |
+| Edge danger | up to −0.3 / step | Linear ramp over 3 world units from boundary; stacks with goal rewards |
+| Fall off map | −50 − remaining_steps × 0.01 | Early termination is strictly worse than late; forfeits future action penalties |
 
 | Condition | Value |
 |---|---|
@@ -52,44 +136,42 @@ With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent
 ## Estimated Training Timeline
 
 > The logic thread runs **free (unlocked)** during training — steps accumulate as fast as the CPU allows. Estimates are in steps only, not wall-clock time.
+> PPO updates every 2,048 steps, so "updates" = total steps ÷ 2,048.
 
-| Milestone | Total Steps | Approx. Episodes |
-|---|---|---|
-| Replay fills enough to learn | ~5,000 | ~8–15 |
-| Epsilon hits floor (0.1) | ~115,000 | ~200–300 |
-| Agent reliably turns toward visible goal | ~300,000–500,000 | ~500–800 |
-| Consistent goal-finding through walls (LOS-aware search) | ~1,200,000–2,500,000 | ~1,500–3,500 |
-| Chaining 5+ goals per episode | ~4,000,000–8,000,000 | ~4,000–8,000 |
+| Milestone | Total Steps | Approx. Updates | Approx. Episodes |
+|---|---|---|---|
+| Agent learns basic movement direction | ~50,000–150,000 | ~25–75 | ~100–300 |
+| Consistent turning toward visible goal | ~300,000–600,000 | ~150–300 | ~500–1,000 |
+| Goal-finding through walls (LOS-aware search) | ~1,000,000–2,000,000 | ~500–1,000 | ~1,500–3,000 |
+| Chaining 5+ goals per episode | ~3,000,000–6,000,000 | ~1,500–3,000 | ~4,000–7,000 |
 
 **Key factors:**
-- Free-running simulation: steps accumulate far faster than real-time — the bottleneck is the PyTorch backward pass, not the physics step.
-- 199-input observation space is larger than before (added xyz sighting history, goal LOS flag, staleness, and last-known position); expect more steps to converge vs. the old 158-float layout.
-- Ground rays give the agent an explicit edge signal, which should eliminate falling-off behaviour well before the agent is otherwise "optimal".
-- **Goal LOS gating:** when the goal is behind a wall, interest bias is zeroed and goal inputs show last-known position. The agent must actively search when it loses sight of the goal — significantly increasing exploration difficulty vs. X-ray vision.
-- Reward shaping (delta-distance + look-alignment) provides a gradient signal every step, not just on goal reach.
-- `gamma=0.999`: agent can credit actions taken ~300 steps before a goal reach.
-- 5 walls (tall, 6 units) in the environment significantly increase the exploration requirement — milestones are ~3–5× later than a flat open map.
-- Map size is **100×100** (navigable area ±20 in world space before walls); ground is large enough that edge-falling is rare once the agent learns edge detection.
-- **3 simultaneous goals** are placed randomly each episode. On goal reach, only the reached goal relocates — the other two remain in place, giving the agent an immediate nearby target and reducing time spent searching after each reach.
-- **Curriculum timeout:** goal search limit starts at 60 s and decreases by 0.003 s per episode to a minimum of 10 s. This prevents the agent from settling into lazy slow-search behaviour early in training while still being reachable by a beginner policy.
-- `epsilon_decay=0.99998` is intentionally slow; rapid decay caused policy collapse when the environment changed mid-training.
+- Free-running simulation: steps accumulate far faster than real-time — the bottleneck is the PyTorch backward pass (10 epochs × ~32 mini-batches per 2,048-step rollout).
+- PPO is generally more sample-efficient than DQN for this task because on-policy updates avoid the experience-staleness problem entirely.
+- **209-input observation space** as of current implementation. Key additions over legacy DQN layout: sin/cos heading encoding, normalised 3-axis velocity + angular velocity, `in_air`/`is_jumping` flags, previous action one-hot (7 actions), and sighting ring buffer.
+- Ground rays give an explicit edge signal, eliminating falling-off behaviour early.
+- **Goal LOS gating:** when the goal is behind a wall, interest bias is zeroed and goal inputs show last-known position. The agent must actively search when it loses sight of the goal.
+- Reward shaping (delta-distance + look-alignment) provides a dense gradient signal every step, not just on goal reach.
+- `gamma=0.999`: agent can credit actions taken ~900 steps before a goal reach over a 30 s episode.
+- 5 walls (tall, 6 units) significantly increase the exploration requirement.
+- Map size is **100×100** (navigable area ±20 in world space); edge-falling is rare once the agent learns edge detection.
+- **3 simultaneous goals** placed randomly each episode. On goal reach, only the reached goal relocates — the others remain, giving an immediate nearby target.
+- **Curriculum timeout:** goal search limit starts at 60 s and decreases by 0.003 s per episode to a floor of 10 s. Resets on every goal reach.
 
 **Note:** Track **total steps**, not episode count. Early episodes are short (timeout-terminated); later episodes grow longer as the policy improves.
 
 ---
 
-## Replay Buffer Analysis
+## Diagnostic Graph Panels (3×3)
 
-| Stat | Value |
+| Position | Panel |
 |---|---|
-| Buffer size | 150,000 transitions |
-| Avg. steps/episode (30s timeout) | ~600–900 |
-| Episodes of history in buffer | ~200 |
-| Steps when epsilon hits floor | ~115,000 (~130–190 episodes) |
-
-**Buffer size is well-matched to the current config.** The buffer fills just as exploitation begins, giving the network a full, diverse batch to learn from at the moment it matters most.
-
-**Why not increase it?**  
-A much larger buffer means early random-walk transitions (from epsilon=1.0) persist into the exploitation phase. Those transitions have no structure and add noise to Bellman targets — known as the *experience staleness* problem. 150k already stores ~200 episodes, which is generous.
-
-**What would help more:** Prioritized Experience Replay (PER) — sample transitions with high TD-error more frequently, so rare wall-navigation recoveries get replayed more often. This is a code change to `experience_replay.py`.
+| (0,0) | Reward + Curriculum (100-ep mean reward, twin axis: goal time limit) |
+| (0,1) | Episode Length |
+| (0,2) | Goals Reached per Episode |
+| (1,0) | Policy Gradient (PG) Loss |
+| (1,1) | Value Function Loss |
+| (1,2) | Gradient Norm |
+| (2,0) | Policy Entropy |
+| (2,1) | Clip Fraction + Approx KL (dual axis) |
+| (2,2) | Action Distribution (last 100 episodes avg) |
