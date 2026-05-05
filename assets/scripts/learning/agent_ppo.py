@@ -464,7 +464,7 @@ class Agent:
                 self.scheduler.step()
 
         self.save_graph()
-        if round_num % 5 == 0:
+        if round_num % 1 == 0:
             self._save_checkpoint()
 
     # ------------------------------------------------------------------
@@ -552,10 +552,10 @@ class Agent:
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                grad_norm_pre_clip = torch.nn.utils.clip_grad_norm_(
+                grad_norm_pre_clip = float(torch.nn.utils.clip_grad_norm_(
                     list(self.actor.parameters()) + list(self.critic.parameters()),
                     self.max_grad_norm
-                ).item()
+                ))
                 self.optimizer.step()
 
                 with torch.no_grad():
@@ -599,7 +599,7 @@ class Agent:
 
         torch.save(checkpoint_data, self.MODEL_FILE)
 
-        if episode % (100 * self.num_agents) == 0:
+        if episode % 50 == 0:
             ckpt_file = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}_ep{episode:08d}.pt')
             torch.save(checkpoint_data, ckpt_file)
             print(f'Checkpoint saved: {ckpt_file}')
