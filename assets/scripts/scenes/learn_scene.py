@@ -30,9 +30,16 @@ LOAD_MODEL  = _config.get("load_model") or None
 if LOAD_MODEL:
     LOAD_MODEL = os.path.join(ASSETS_FOLDER, LOAD_MODEL)
 NUM_AGENTS  = int(_config.get("num_agents", 1))
+CHECKPOINT_CONFIG = _config.get("checkpointing", {})
 
 scene_agent = Agent('seeker')
-scene_agent.setup(env.num_states, env.num_actions, IS_TRAINING, LOAD_MODEL, num_agents=NUM_AGENTS)
+scene_agent.setup(
+    env.num_states,
+    env.num_actions,
+    IS_TRAINING,
+    LOAD_MODEL,
+    num_agents=NUM_AGENTS,
+    checkpoint_config=CHECKPOINT_CONFIG)
 def step(obs, agent_id=0):
     _try_bind_env()
     return scene_agent.step(obs, agent_id=agent_id)

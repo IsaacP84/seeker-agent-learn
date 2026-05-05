@@ -3,6 +3,9 @@ print(sys.prefix)
 print(sys.path)
 
 import os
+import io
+import json
+import zipfile
 import shutil
 import threading
 import time
@@ -48,11 +51,26 @@ def log_message(file, msg):
         f.write(msg + '\n')
 
 
+def _is_checkpoint_file(name):
+    return name.endswith('.pt') or name.endswith('.pt.zip')
+
+
+def _load_checkpoint(path):
+    if path.endswith('.zip'):
+        with zipfile.ZipFile(path, 'r') as archive:
+            members = [m for m in archive.namelist() if m.endswith('.pt')]
+            if not members:
+                raise FileNotFoundError(f'No .pt file found inside archive: {path}')
+            with archive.open(members[0], 'r') as fh:
+                return torch.load(io.BytesIO(fh.read()), map_location=device)
+    return torch.load(path, map_location=device)
+
+
 def find_latest_checkpoint(model_file=None):
     pt_files = [
         os.path.join(RUNS_DIR, f)
         for f in os.listdir(RUNS_DIR)
-        if f.endswith('.pt')
+        if _is_checkpoint_file(f)
     ] if os.path.isdir(RUNS_DIR) else []
     if pt_files:
         return max(pt_files, key=os.path.getmtime)
@@ -61,7 +79,7 @@ def find_latest_checkpoint(model_file=None):
         asset_pt_files = [
             os.path.join(assets_runs, f)
             for f in os.listdir(assets_runs)
-            if f.endswith('.pt')
+            if _is_checkpoint_file(f)
         ]
         if asset_pt_files:
             chosen = max(asset_pt_files, key=os.path.getmtime)
@@ -110,12 +128,29 @@ class Agent:
         self.LOG_FILE   = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.log')
         self.MODEL_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.pt')
         self.GRAPH_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.png')
+        self.DIAGNOSTICS_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}_diagnostics.json')
 
     # ------------------------------------------------------------------
-    def setup(self, num_states, num_actions, is_training=True, load_model_file=None, num_agents=1):
+    def setup(self, num_states, num_actions, is_training=True, load_model_file=None, num_agents=1, checkpoint_config=None):
         self.num_states  = num_states
         self.num_actions = num_actions
         self.is_training = is_training
+
+        checkpoint_config = checkpoint_config or {}
+        self.checkpoint_config = checkpoint_config
+        self.rolling_mode = checkpoint_config.get('rolling_mode', 'compact')
+        self.max_history_entries = int(checkpoint_config.get('max_history_entries', 0))
+        self.downsample_rate = max(1, int(checkpoint_config.get('downsample_rate', 1)))
+        self.compress = checkpoint_config.get('compress', None)
+        self.full_checkpoint_interval = int(checkpoint_config.get('full_checkpoint_interval', 100))
+        self.save_replay_buffer_on_full = bool(checkpoint_config.get('save_replay_buffer_on_full', False))
+        self.save_diagnostics_separately = bool(checkpoint_config.get('save_diagnostics_separately', False))
+        self.archival_float16 = bool(checkpoint_config.get('archival_float16', False))
+        self.diagnostics_filename_template = checkpoint_config.get('diagnostics_filename_template', '{name}_diagnostics.json')
+        self.DIAGNOSTICS_FILE = os.path.join(
+            RUNS_DIR,
+            self.diagnostics_filename_template.format(name=self.hyperparameter_set)
+        )
 
         self.actor  = Actor( num_states, num_actions, self.hidden_dims).to(device)
         self.critic = Critic(num_states,              self.hidden_dims).to(device)
@@ -203,7 +238,7 @@ class Agent:
         if latest_checkpoint:
             print(f'Loading checkpoint: {latest_checkpoint}')
             try:
-                checkpoint = torch.load(latest_checkpoint, map_location=device)
+                checkpoint = _load_checkpoint(latest_checkpoint)
 
                 if 'actor' not in checkpoint:
                     print('Warning: checkpoint has no "actor" key (may be a DQN checkpoint). Starting fresh.')
@@ -251,6 +286,20 @@ class Agent:
                                     'goal_reach_history'):
                             if key in checkpoint:
                                 setattr(self, key, checkpoint[key])
+                        if self.save_diagnostics_separately and os.path.exists(self.DIAGNOSTICS_FILE):
+                            try:
+                                with open(self.DIAGNOSTICS_FILE, 'r') as df:
+                                    diag = json.load(df)
+                                for key in ('rewards_per_episode', 'goal_time_limit_history',
+                                            'action_dist_history', 'pg_loss_history',
+                                            'value_loss_history', 'entropy_history',
+                                            'clip_frac_history', 'approx_kl_history',
+                                            'episode_length_history', 'gradient_norm_history',
+                                            'goal_reach_history'):
+                                    if key in diag:
+                                        setattr(self, key, diag[key])
+                            except Exception:
+                                pass
                         if 'env_data' in checkpoint:
                             self._loaded_env_data = checkpoint['env_data']
                     log_message(self.LOG_FILE, f'Loaded checkpoint: {latest_checkpoint}')
@@ -574,35 +623,145 @@ class Agent:
         # _run_ppo_update_async before the thread starts.
 
     # ------------------------------------------------------------------
+    def _trim_histories(self):
+        if self.max_history_entries <= 0:
+            return
+        history_attrs = [
+            'rewards_per_episode', 'goal_time_limit_history', 'action_dist_history',
+            'pg_loss_history', 'value_loss_history', 'entropy_history',
+            'clip_frac_history', 'approx_kl_history', 'episode_length_history',
+            'gradient_norm_history', 'goal_reach_history'
+        ]
+        for attr in history_attrs:
+            hist = getattr(self, attr, None)
+            if isinstance(hist, list) and len(hist) > self.max_history_entries:
+                del hist[:-self.max_history_entries]
+
+    def _downsample_list(self, data):
+        if self.downsample_rate <= 1 or not data:
+            return data
+        result = [data[i] for i in range(0, len(data), self.downsample_rate)]
+        if data and result[-1] != data[-1]:
+            result.append(data[-1])
+        return result
+
+    def _save_diagnostics_file(self):
+        diagnostics = {
+            'round': len(self.rewards_per_episode),
+            'rewards_per_episode':    self._downsample_list(self.rewards_per_episode),
+            'goal_time_limit_history':self._downsample_list(self.goal_time_limit_history),
+            'action_dist_history':    self._downsample_list(self.action_dist_history),
+            'pg_loss_history':        self._downsample_list(self.pg_loss_history),
+            'value_loss_history':     self._downsample_list(self.value_loss_history),
+            'entropy_history':        self._downsample_list(self.entropy_history),
+            'clip_frac_history':      self._downsample_list(self.clip_frac_history),
+            'approx_kl_history':      self._downsample_list(self.approx_kl_history),
+            'episode_length_history': self._downsample_list(self.episode_length_history),
+            'gradient_norm_history':  self._downsample_list(self.gradient_norm_history),
+            'goal_reach_history':     self._downsample_list(self.goal_reach_history),
+        }
+        filename = self.diagnostics_filename_template.format(name=self.hyperparameter_set)
+        filepath = os.path.join(RUNS_DIR, filename)
+        with open(filepath, 'w') as f:
+            json.dump(diagnostics, f)
+        return filepath
+
+    def _apply_archival_float16(self, checkpoint_data):
+        if not self.archival_float16 or 'buffer' not in checkpoint_data:
+            return
+        for key, value in checkpoint_data['buffer'].items():
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                checkpoint_data['buffer'][key] = value.half()
+
+    def _save_pt_file(self, path, data):
+        if self.compress == 'zip':
+            zip_path = path + '.zip' if not path.endswith('.zip') else path
+            buffer = io.BytesIO()
+            torch.save(data, buffer)
+            with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(os.path.basename(path), buffer.getvalue())
+            return zip_path
+        torch.save(data, path)
+        return path
+
+    def _prune_old_checkpoints(self):
+        prefix = f'{self.hyperparameter_set}_ep'
+        checkpoint_files = [
+            os.path.join(RUNS_DIR, f)
+            for f in os.listdir(RUNS_DIR)
+            if f.startswith(prefix) and _is_checkpoint_file(f)
+        ]
+        if len(checkpoint_files) <= self.max_history_entries:
+            return
+        checkpoint_files.sort(key=os.path.getmtime)
+        for old_ckpt in checkpoint_files[:-self.max_history_entries]:
+            try:
+                os.remove(old_ckpt)
+            except OSError:
+                pass
+
     def _save_checkpoint(self):
         episode = len(self.rewards_per_episode)
+        self._trim_histories()
+
         checkpoint_data = {
             'actor':                  self.actor.state_dict(),
             'critic':                 self.critic.state_dict(),
             'optimizer':              self.optimizer.state_dict(),
             'reward_scale':           self.reward_scale,
             **({'scheduler': self.scheduler.state_dict()} if self.scheduler is not None else {}),
-            'rewards_per_episode':    self.rewards_per_episode,
-            'goal_time_limit_history':self.goal_time_limit_history,
-            'action_dist_history':    self.action_dist_history,
-            'pg_loss_history':        self.pg_loss_history,
-            'value_loss_history':     self.value_loss_history,
-            'entropy_history':        self.entropy_history,
-            'clip_frac_history':      self.clip_frac_history,
-            'approx_kl_history':      self.approx_kl_history,
-            'episode_length_history': self.episode_length_history,
-            'gradient_norm_history':  self.gradient_norm_history,
-            'goal_reach_history':     self.goal_reach_history,
         }
+
+        if not self.save_diagnostics_separately:
+            checkpoint_data.update({
+                'rewards_per_episode':    self.rewards_per_episode,
+                'goal_time_limit_history':self.goal_time_limit_history,
+                'action_dist_history':    self.action_dist_history,
+                'pg_loss_history':        self.pg_loss_history,
+                'value_loss_history':     self.value_loss_history,
+                'entropy_history':        self.entropy_history,
+                'clip_frac_history':      self.clip_frac_history,
+                'approx_kl_history':      self.approx_kl_history,
+                'episode_length_history': self.episode_length_history,
+                'gradient_norm_history':  self.gradient_norm_history,
+                'goal_reach_history':     self.goal_reach_history,
+            })
+
         if self._env is not None:
             checkpoint_data['env_data'] = self._env.get_env_data()
 
-        torch.save(checkpoint_data, self.MODEL_FILE)
+        model_path = self._save_pt_file(self.MODEL_FILE, checkpoint_data)
+        if model_path != self.MODEL_FILE:
+            self.MODEL_FILE = model_path
 
-        if episode % 50 == 0:
+        if self.save_diagnostics_separately:
+            diag_path = self._save_diagnostics_file()
+        else:
+            diag_path = None
+
+        if self.full_checkpoint_interval > 0 and episode % self.full_checkpoint_interval == 0:
             ckpt_file = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}_ep{episode:08d}.pt')
-            torch.save(checkpoint_data, ckpt_file)
-            print(f'Checkpoint saved: {ckpt_file}')
+            if self.save_replay_buffer_on_full and self.buffer._size > 0:
+                buffer_snapshot = self.buffer.snapshot()
+                checkpoint_data['buffer'] = {
+                    'obs':       buffer_snapshot._obs[:buffer_snapshot._size].cpu(),
+                    'actions':   buffer_snapshot._actions[:buffer_snapshot._size].cpu(),
+                    'rewards':   buffer_snapshot._rewards[:buffer_snapshot._size].cpu(),
+                    'dones':     buffer_snapshot._dones[:buffer_snapshot._size].cpu(),
+                    'log_probs': buffer_snapshot._log_probs[:buffer_snapshot._size].cpu(),
+                    'values':    buffer_snapshot._values[:buffer_snapshot._size].cpu(),
+                    'agent_ids': buffer_snapshot._agent_ids[:buffer_snapshot._size].cpu(),
+                    'size':      buffer_snapshot._size,
+                    'ptr':       buffer_snapshot._ptr,
+                }
+            self._apply_archival_float16(checkpoint_data)
+            full_path = self._save_pt_file(ckpt_file, checkpoint_data)
+            if self.rolling_mode == 'compact' and self.max_history_entries > 0:
+                self._prune_old_checkpoints()
+            print(f'Checkpoint saved: {full_path}')
+
+        if self.save_diagnostics_separately and diag_path is not None:
+            print(f'Diagnostics saved: {diag_path}')
 
     # ------------------------------------------------------------------
     def run(self, is_training=True, render=False):
