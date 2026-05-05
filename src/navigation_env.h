@@ -111,6 +111,7 @@ public:
     Seeker::Action                             pending_action() const;
     std::unordered_map<std::string, float>     get_env_data() const;
     void                                       set_env_data(const std::unordered_map<std::string, float> &data);
+    std::unordered_map<std::string, float>     get_config_data() const;
     int                                        episode_count() const { return m_episode_count; }
     void                                       disable_goal_timeout() { m_current_goal_time_limit = std::numeric_limits<float>::max(); }
 

@@ -5,7 +5,7 @@
 DQN has been replaced with PPO. The C++↔Python interface (`step(obs) → int`, `feedback(prev_obs, action, reward, done, next_obs)`) is unchanged. The agent now uses separate Actor and Critic networks trained on fixed-length rollouts with GAE-Lambda advantage estimation.
 
 **Key files:**
-- `assets/scripts/learning/agent.py` — Agent class (PPO training loop)
+- `assets/scripts/learning/agent_ppo.py` — Agent class (PPO training loop)
 - `assets/scripts/learning/ppo_network.py` — Actor and Critic network definitions
 - `assets/scripts/learning/trajectory_buffer.py` — On-policy rollout buffer with GAE
 - DQN backups: `agent_dqn.py`, `dqn_backup.py`, `experience_replay_dqn.py`
@@ -16,16 +16,19 @@ DQN has been replaced with PPO. The C++↔Python interface (`step(obs) → int`,
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| `n_steps` | 2,048 | Rollout length before each PPO update; matches common PPO defaults |
+| `n_steps` | 4,096 | Rollout length before each PPO update; captures ~2 full episodes per update |
 | `n_epochs` | 10 | Number of passes over each rollout batch |
-| `mini_batch_size` | 64 | Mini-batch size within each epoch |
-| `clip_epsilon` | 0.2 | PPO clipping range; standard value |
+| `mini_batch_size` | 256 | Mini-batch size within each epoch |
+| `clip_epsilon` | 0.1 | PPO clipping range |
 | `gae_lambda` | 0.95 | GAE smoothing — balances bias vs. variance in advantage estimates |
 | `discount_factor_g` | 0.999 | `0.999^900 ≈ 0.41` — agent retains meaningful credit across the full 30 s search window |
+| `reward_scale` | 0.1 | Divides every reward before it enters the buffer, keeping returns in a unit-ish range |
 | `entropy_coeff` | 0.01 | Entropy bonus weight; keeps exploration alive without dominating the loss |
-| `value_loss_coeff` | 0.5 | Critic loss weight relative to actor loss |
-| `learning_rate_a` | 0.0003 | Single Adam optimizer over Actor + Critic parameters |
-| `max_grad_norm` | 0.5 | Gradient clipping threshold |
+| `value_loss_coeff` | 1.0 | Critic loss weight relative to actor loss |
+| `learning_rate_a` | 0.0001 | Initial Adam learning rate over Actor + Critic parameters |
+| `lr_min` | 0.00003 | Cosine annealing minimum LR |
+| `lr_decay_episodes` | 5,000 | Episodes over which LR cosine-anneals from `learning_rate_a` to `lr_min` |
+| `max_grad_norm` | 1.0 | Gradient clipping threshold |
 | `stop_on_reward` | 999,999 | Multi-goal episodes can score 200+ when trained; don't stop prematurely |
 | `hidden_dims` | [256, 256, 128] | Both Actor and Critic use separate MLPs with this architecture |
 
@@ -50,11 +53,11 @@ Input (209) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(128) �
 Each C++ physics step calls `step(obs)` then `feedback(...)` once. Internally:
 
 1. `step()` samples from the Actor (stochastic in training, greedy in inference) and caches `log_prob` and `V(s)` for the next `observe()` call.
-2. `observe()` appends the transition to the `RolloutBuffer`. When the buffer has accumulated **2,048 steps**:
+2. `observe()` appends the transition to the `RolloutBuffer`. When the buffer has accumulated **4,096 steps**:
    - Bootstrap the last value with `V(next_state)` from the Critic
    - Compute GAE-Lambda advantages and discounted returns over the full rollout
    - Normalize advantages (zero mean, unit std)
-   - Run **10 epochs** of mini-batch PPO updates (64-step batches, randomly shuffled each epoch)
+   - Run **10 epochs** of mini-batch PPO updates (256-step batches, randomly shuffled each epoch)
    - Clipped surrogate loss + value loss + entropy bonus
    - Clip gradient norm to 0.5
    - Clear the buffer
@@ -114,20 +117,23 @@ On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detect
 | Signal | Value | Notes |
 |---|---|---|
 | Goal reached | +10.0 | Goal relocates randomly; episode continues |
+| Goal speed bonus | +2.0 | Added to goal reward if goal reached within 15 s |
 | Delta distance | shaping | `prev_dist − curr_dist` per step; positive when moving closer |
-| Look alignment | +0.01 × cos(angle_diff) | Encourages facing the goal |
+| Look alignment | +0.003 × cos(angle_diff) | Encourages facing the goal |
+| Forward reward | +0.002 / step | Bonus per step for MOVE_FORWARD while grounded |
 | Action penalty | −0.01 / step | Constant cost; incentivises efficient routes |
-| Strafe penalty | −0.005 / step | Applied on top of action penalty when strafing |
+| Strafe penalty | −0.02 / step | Applied on top of action penalty when strafing |
+| Stuck penalty | −0.05 / step | Applied when moving but speed < 0.5 m/s (stuck against wall) |
 | Edge danger | up to −0.3 / step | Linear ramp over 3 world units from boundary; stacks with goal rewards |
 | Fall off map | −50 − remaining_steps × 0.01 | Early termination is strictly worse than late; forfeits future action penalties |
 
 | Condition | Value |
 |---|---|
-| Max steps | 2,000 |
-| Max episode time | 180 s |
-| Goal search timeout | 60 s initially, decreasing by 0.003 s per episode down to a floor of 10 s (resets on every goal reach) |
+| Max steps | 100,000 |
+| Max episode time | 300 s |
+| Goal search timeout | 60 s initially, decreasing by 0.001 s per episode down to a floor of 10 s (resets on every goal reach) |
 
-The curriculum shrinks the time limit each episode (`SEARCH_TIME_FALL_RATE = 0.003`), forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
+The curriculum shrinks the time limit each episode (`SEARCH_TIME_FALL_RATE = 0.001`), forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
 
 With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent always has a nearby target visible. A well-trained agent scoring 15–30 goals/episode earns 150–300+ reward.
 
@@ -136,7 +142,7 @@ With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent
 ## Estimated Training Timeline
 
 > The logic thread runs **free (unlocked)** during training — steps accumulate as fast as the CPU allows. Estimates are in steps only, not wall-clock time.
-> PPO updates every 2,048 steps, so "updates" = total steps ÷ 2,048.
+> PPO updates every 4,096 steps, so "updates" = total steps ÷ 4,096.
 
 | Milestone | Total Steps | Approx. Updates | Approx. Episodes |
 |---|---|---|---|
@@ -149,6 +155,8 @@ With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent
 - Free-running simulation: steps accumulate far faster than real-time — the bottleneck is the PyTorch backward pass (10 epochs × ~32 mini-batches per 2,048-step rollout).
 - PPO is generally more sample-efficient than DQN for this task because on-policy updates avoid the experience-staleness problem entirely.
 - **209-input observation space** as of current implementation. Key additions over legacy DQN layout: sin/cos heading encoding, normalised 3-axis velocity + angular velocity, `in_air`/`is_jumping` flags, previous action one-hot (7 actions), and sighting ring buffer.
+- **Reward scaling:** all rewards are multiplied by `reward_scale = 0.1` before entering the buffer, keeping discounted returns in a unit-ish range without per-batch normalisation.
+- **LR schedule:** cosine annealing from 0.0001 → 0.00003 over 5,000 episodes.
 - Ground rays give an explicit edge signal, eliminating falling-off behaviour early.
 - **Goal LOS gating:** when the goal is behind a wall, interest bias is zeroed and goal inputs show last-known position. The agent must actively search when it loses sight of the goal.
 - Reward shaping (delta-distance + look-alignment) provides a dense gradient signal every step, not just on goal reach.

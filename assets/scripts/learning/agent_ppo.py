@@ -541,6 +541,12 @@ class Agent:
                      self.goal_time_limit_history, color='tab:orange', alpha=0.6)
             ax2.set_ylabel('Goal Time Limit (s)', color='tab:orange')
             ax2.tick_params(axis='y', labelcolor='tab:orange')
+            if self._env is not None:
+                cfg = self._env.get_config_data()
+                ax2.set_ylim(cfg.get('min_goal_search_seconds', 10.0),
+                             cfg.get('max_goal_search_seconds', 60.0))
+            else:
+                ax2.set_ylim(10.0, 60.0)
 
         # ── (0,1) Episode Length ────────────────────────────────────────────────
         ax = axes[0, 1]

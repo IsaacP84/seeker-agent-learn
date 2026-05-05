@@ -20,5 +20,4 @@ if errorlevel 1 exit /b 1
 cmake --install "%BUILD_DIR%" --config Release --prefix "%INSTALL_DIR%"
 if errorlevel 1 exit /b 1
 
-echo.
 echo Installed to: %INSTALL_DIR%

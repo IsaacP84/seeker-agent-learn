@@ -561,6 +561,14 @@ std::unordered_map<std::string, float> NavigationEnv::get_env_data() const
     };
 }
 
+std::unordered_map<std::string, float> NavigationEnv::get_config_data() const
+{
+    return {
+        {"min_goal_search_seconds", Episode::min_goal_search_seconds},
+        {"max_goal_search_seconds", Episode::max_goal_search_seconds},
+    };
+}
+
 void NavigationEnv::set_env_data(const std::unordered_map<std::string, float> &data)
 {
     auto it = data.find("current_goal_time_limit");
