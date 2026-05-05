@@ -21,7 +21,9 @@ engine.zip
 # Logs and runtime artifacts
 *.log
 runs/
-assets/learning/runs/
+assets/learning/runs/*
+!assets/learning/runs/
+!assets/learning/runs/*.zip
 
 update.bat
 *install*/
