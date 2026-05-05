@@ -19,11 +19,18 @@ using namespace Magic;
 class NavIgnoreSelfFilter : public JPH::BodyFilter
 {
 public:
-    NavIgnoreSelfFilter(JPH::BodyID id) : m_id(id) {}
-    bool ShouldCollide(const JPH::BodyID &id) const override { return id != m_id; }
-
+    NavIgnoreSelfFilter(JPH::BodyID self, const std::vector<JPH::BodyID> &extra)
+        : m_self(self), m_extra(extra) {}
+    bool ShouldCollide(const JPH::BodyID &id) const override
+    {
+        if (id == m_self) return false;
+        for (const auto &x : m_extra)
+            if (id == x) return false;
+        return true;
+    }
 private:
-    JPH::BodyID m_id;
+    JPH::BodyID m_self;
+    const std::vector<JPH::BodyID> &m_extra;
 };
 
 void NavigationEnv::bind(EntityManager &em, Entity seeker, std::vector<Entity> goals)
@@ -50,10 +57,11 @@ std::vector<float> NavigationEnv::reset()
     Debug::Log("NavigationEnv reset");
     ++m_episode_count;
     m_step_count       = 0;
+    m_goals_this_episode = 0;
     m_elapsed_seconds  = 0.f;
     m_time_since_goal  = 0.f;
     m_done             = false;
-    m_pending_action   = 0;
+    m_pending_action   = -1;
     m_prev_action      = -1;
 
     m_current_goal_time_limit = std::max(Episode::min_goal_search_seconds,
@@ -158,7 +166,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     }
 
     // --- LOS check + goal info: one ray per goal, derive nearest-goal visibility from results ---
-    NavIgnoreSelfFilter self_filter(body_id);
+    NavIgnoreSelfFilter self_filter(body_id, m_ignored_bodies);
     struct GoalInfo
     {
         bool              visible;
@@ -189,9 +197,9 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     bool goal_visible = !m_goals.empty() && goal_infos[m_nearest_goal_idx].visible;
     if (goal_visible)
     {
-        if (!m_was_goal_visible)
-            Debug::Log("Goal spotted (idx=" + std::to_string(m_nearest_goal_idx)
-                + ", dist=" + std::to_string(m_nearest_goal_dist) + ")");
+        // if (!m_was_goal_visible)
+        //     Debug::Log("Goal spotted (idx=" + std::to_string(m_nearest_goal_idx)
+        //         + ", dist=" + std::to_string(m_nearest_goal_dist) + ")");
         m_last_known_goal_pos     = goal_pos;
         m_time_since_goal_visible = 0.f;
     }
@@ -444,6 +452,9 @@ float NavigationEnv::compute_reward()
         if (m_goals[nearest_idx].entity != entt::null && reg.all_of<Transform>(m_goals[nearest_idx].entity))
             reg.get<Transform>(m_goals[nearest_idx].entity).pos = m_goals[nearest_idx].pos;
 
+        Debug::Log("Seeker_" + std::to_string(m_agent_id) + " collected goal " + std::to_string(nearest_idx) +
+                   " (goals this episode: " + std::to_string(++m_goals_this_episode) + ")");
+
         // Update prev_distance to nearest remaining goal after relocation.
         float new_nearest = std::numeric_limits<float>::max();
         for (const auto &g : m_goals)
@@ -505,6 +516,15 @@ bool NavigationEnv::is_done() const
         || m_time_since_goal >= m_current_goal_time_limit;
 }
 
+bool NavigationEnv::is_terminal() const
+{
+    // Only true when the agent fell off the map — a true terminal state
+    // with no continuation value. Step/time/goal-timeout truncations are
+    // NOT terminal: the episode ends but the world continues, so V(s_last)
+    // should be used as the GAE bootstrap, not 0.
+    return m_done;
+}
+
 void NavigationEnv::apply_action(int action)
 {
     m_prev_action    = m_pending_action;
@@ -548,6 +568,8 @@ Seeker::Action NavigationEnv::pending_action() const
         return Seeker::TURN_RIGHT;
     case 6:
         return Seeker::JUMP;
+    case 7:
+        return Seeker::NONE;
     default:
         return Seeker::NONE;
     }

@@ -29,22 +29,30 @@ public:
     void handle_input(const SDL_Event &) override;
 
 private:
-    Seeker           m_seeker;
-    std::vector<Magic::Entity> m_goals;
+    struct AgentSlot {
+        Seeker                         seeker;
+        std::vector<Magic::Entity>     goals;
+        std::unique_ptr<NavigationEnv> env;
+        std::vector<float>             last_obs;
+        int                            last_action  = -1;
+        bool                           has_last_obs = false;
+        bool                           episode_done = false; // waiting for other agents to finish the round
+    };
+
+    int                        m_num_agents = 1;
+    std::vector<AgentSlot>     m_agents;
     std::vector<Magic::Entity> m_boundary_walls;
-    bool m_walls_removed = false;
-    // Use unique_ptr to avoid requiring the full definition in the header.
-    std::unique_ptr<NavigationEnv> m_env;
-    std::vector<float> m_last_obs;
-    int m_last_action = -1;
-    bool m_has_last_obs = false;
+    bool                       m_walls_removed = false;
 
     nb::object m_python_scene;
     nb::object m_step_func;
     nb::object m_feedback_func;
-    bool m_has_feedback = false;
+    nb::object m_round_complete_func;
+    bool m_has_feedback       = false;
+    bool m_has_round_complete = false;
     bool m_is_training = true;
 
     void remove_boundary_walls();
+    void _clear_python_env_refs();
 };
 

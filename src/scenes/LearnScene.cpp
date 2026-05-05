@@ -14,6 +14,7 @@
 #include <Magic!/components/physics.hpp>
 #include <Magic!/components/renderable.hpp>
 #include <Magic!/components/events.hpp>
+#include <Magic!/components/tags.hpp>
 
 #include <Magic!/render/meshes/cube.hpp>
 
@@ -42,7 +43,7 @@ using namespace Magic;
 bool in_background = false;
 
 LearnScene::LearnScene(Magic::SceneManager &sm)
-    : Magic::Scene(sm), m_env(std::make_unique<NavigationEnv>())
+    : Magic::Scene(sm)
 {
 }
 
@@ -54,8 +55,29 @@ void LearnScene::onCreate()
     Seeker::LoadModel();
 }
 
+void LearnScene::_clear_python_env_refs()
+{
+    if (!m_python_scene)
+        return;
+    nb::gil_scoped_acquire acquire;
+    try
+    {
+        m_python_scene.attr("scene_env")  = nb::none();
+        m_python_scene.attr("scene_envs") = nb::list();
+        if (nb::hasattr(m_python_scene, "scene_agent"))
+        {
+            auto agent = m_python_scene.attr("scene_agent");
+            agent.attr("_env") = nb::none();
+        }
+        // Force a GC pass so cyclic references don't keep wrappers alive.
+        nb::module_::import_("gc").attr("collect")();
+    }
+    catch (...) {}
+}
+
 void LearnScene::onDestroy()
 {
+    _clear_python_env_refs();
 }
 
 void LearnScene::onActivate()
@@ -73,8 +95,15 @@ void LearnScene::onActivate()
                 m_feedback_func = m_python_scene.attr("feedback");
                 m_has_feedback  = true;
             }
+            if (nb::hasattr(m_python_scene, "round_complete"))
+            {
+                m_round_complete_func = m_python_scene.attr("round_complete");
+                m_has_round_complete  = true;
+            }
             if (nb::hasattr(m_python_scene, "IS_TRAINING"))
                 m_is_training = nb::cast<bool>(m_python_scene.attr("IS_TRAINING"));
+            if (nb::hasattr(m_python_scene, "NUM_AGENTS"))
+                m_num_agents = nb::cast<int>(m_python_scene.attr("NUM_AGENTS"));
             // Run the logic thread as fast as possible during training.
             Application::get().use_locked_simulation_speed(!m_is_training);
             LOG("LEARN SCENE READY");
@@ -123,39 +152,72 @@ void LearnScene::onActivate()
     }
     m_walls_removed = false;
 
-    // ---- Goal entities ----
-    m_goals.clear();
-    for (int i = 0; i < NavigationEnv::Sizes::num_goals; ++i)
+    // ---- Per-agent slots: goals + seeker + env ----
+    // Each agent has its own goal entities but they are placed at the same
+    // initial positions so all agents start with an equivalent layout.
+    m_agents.clear();
+    m_agents.reserve(m_num_agents);
+    for (int a = 0; a < m_num_agents; ++a)
     {
-        Entity goal = em.create("Goal" + std::to_string(i), {Vec3{3.f * (i + 1), 0.5f, 3.f}});
-        RenderObject goal_ro = rm.copy("cool_box");
-        goal_ro.model(rm.copy(goal_ro.handle()));
-        em.addComponent<Magic::RenderObject>(goal, goal_ro);
-        m_goals.push_back(goal);
+        AgentSlot &slot = m_agents.emplace_back();
+        slot.env = std::make_unique<NavigationEnv>();
+
+        // Goals for this agent — same initial positions for every agent.
+        for (int g = 0; g < NavigationEnv::Sizes::num_goals; ++g)
+        {
+            std::string name = "Goal_a" + std::to_string(a) + "_g" + std::to_string(g);
+            Entity goal = em.create(name, {Vec3{3.f * (g + 1), 0.5f, 3.f}});
+            RenderObject goal_ro = rm.copy("cool_box");
+            goal_ro.model(rm.copy(goal_ro.handle()));
+            em.addComponent<Magic::RenderObject>(goal, goal_ro);
+            slot.goals.push_back(goal);
+        }
+
+        slot.seeker = Seeker(*m_entity_manager);
+        slot.env->bind(*m_entity_manager, slot.seeker(), slot.goals);
+        slot.env->set_agent_id(a);
+
+        // Wire the seeker callback to this slot's env.
+        {
+            auto [lock, reg] = m_entity_manager->get_registry();
+            auto &data = reg.get<Seeker::Data>(slot.seeker());
+            NavigationEnv *env_ptr = slot.env.get();
+            data.on_move_override = [env_ptr](EntityManager &, Entity, double) -> Seeker::Action
+            {
+                return env_ptr->pending_action();
+            };
+        }
     }
-    m_seeker = Seeker(*m_entity_manager);
 
-    // Bind env to the freshly constructed seeker.
-    m_env->bind(*m_entity_manager, m_seeker(), m_goals);
-
-    // Expose the env instance to the Python scene so it can save/restore env data.
-    if (m_python_scene)
-    {
-        nb::gil_scoped_acquire acquire;
-        m_python_scene.attr("scene_env") = nb::cast(m_env.get(), nb::rv_policy::reference);
-    }
-
-    // Wire the seeker callback to the env.
-    // Scope the registry lock tightly — holding it past this block causes a deadlock
-    // when anything else in onActivate() (or the callback itself) tries to acquire it.
+    // Give each env the body IDs of all OTHER seekers so raycasts ignore them.
     {
         auto [lock, reg] = m_entity_manager->get_registry();
-        auto &data = reg.get<Seeker::Data>(m_seeker());
-        NavigationEnv *env_ptr = m_env.get();
-        data.on_move_override = [env_ptr](EntityManager &, Entity, double) -> Seeker::Action
+        std::vector<JPH::BodyID> all_seeker_ids;
+        all_seeker_ids.reserve(m_agents.size());
+        for (auto &s : m_agents)
+            if (s.seeker() != entt::null && reg.all_of<Magic::RigidBody>(s.seeker()))
+                all_seeker_ids.push_back(reg.get<Magic::RigidBody>(s.seeker()).id);
+
+        for (int a = 0; a < (int)m_agents.size(); ++a)
         {
-            return env_ptr->pending_action();
-        };
+            std::vector<JPH::BodyID> others;
+            others.reserve(all_seeker_ids.size() - 1);
+            for (int b = 0; b < (int)all_seeker_ids.size(); ++b)
+                if (b != a) others.push_back(all_seeker_ids[b]);
+            m_agents[a].env->set_ignored_bodies(std::move(others));
+        }
+    }
+
+    // Expose envs to Python: primary (agent 0) as scene_env + full list as scene_envs.
+    if (m_python_scene && !m_agents.empty())
+    {
+        nb::gil_scoped_acquire acquire;
+        m_python_scene.attr("scene_env") = nb::cast(m_agents[0].env.get(), nb::rv_policy::reference);
+
+        nb::list env_list;
+        for (auto &s : m_agents)
+            env_list.append(nb::cast(s.env.get(), nb::rv_policy::reference));
+        m_python_scene.attr("scene_envs") = env_list;
     }
 }
 
@@ -163,12 +225,14 @@ void LearnScene::onDeactivate()
 {
     Application::get().use_locked_simulation_speed(true);
     Application::get().SetRelativeMouseMode(false);
+
+    _clear_python_env_refs();
+
     m_entity_manager->clear();
-    m_has_last_obs = false;
-    m_last_obs.clear();
-    m_last_action = -1;
+    m_agents.clear();
     m_boundary_walls.clear(); // already freed by clear() above
     m_walls_removed = false;
+    Seeker::ClearBodyIds();
 }
 
 // doesn't get called when the engine is paused
@@ -178,82 +242,164 @@ void LearnScene::update(double dt)
     Camera &cam = Application::get().CurrentCamera();
     free_cam_motion_update_handler(dt, cam);
 
-    // Ask Python for the next action and apply it.
+    // Ask Python for the next action and apply it — once per agent slot.
     {
         nb::gil_scoped_acquire acquire;
+
+        // Static RNG for seeker spawn positions — shared across all agents.
+        static std::mt19937 rng{std::random_device{}()};
+        static std::uniform_real_distribution<float> dist(
+            NavigationEnv::World::min * NavigationEnv::World::spawn_margin,
+            NavigationEnv::World::max * NavigationEnv::World::spawn_margin);
+
+        if (!m_step_func)
+            return;
+
         try
         {
-            std::vector<float> obs;
-            bool prev_done = false;
-            if (m_has_last_obs)
+            for (int i = 0; i < (int)m_agents.size(); ++i)
             {
-                float reward = m_env->compute_reward();
-                bool done = m_env->is_done();
-                obs = m_env->get_observation(static_cast<float>(dt));
-                if (m_is_training && m_has_feedback && m_feedback_func)
+                AgentSlot &slot = m_agents[i];
+
+                // This agent has finished its episode and is waiting for the
+                // others to finish before the round resets synchronously.
+                if (slot.episode_done)
+                    continue;
+
+                std::vector<float> obs;
+                if (slot.has_last_obs)
                 {
-                    m_feedback_func(m_last_obs, m_last_action, reward, done, obs);
+                    float reward    = slot.env->compute_reward();
+                    bool  episode_over = slot.env->is_done();
+                    // Pass true terminal (fell off map) vs truncation (timeout/step-limit)
+                    // separately so the rollout buffer bootstraps truncations with V(s_last)
+                    // rather than 0, avoiding systematic value underestimation.
+                    bool  terminal  = slot.env->is_terminal();
+                    obs = slot.env->get_observation(static_cast<float>(dt));
+
+                    if (m_is_training && m_has_feedback && m_feedback_func)
+                        m_feedback_func(slot.last_obs, slot.last_action, reward, terminal, obs, i);
+
+                    if (episode_over)
+                    {
+                        // Mark done but do NOT reset yet — wait for all agents
+                        // to finish so the round resets synchronously.
+                        // Freeze the seeker immediately so it doesn't keep
+                        // executing its last action and colliding with the
+                        // still-running agents (raycasts ignore it, physics doesn't).
+                        slot.env->set_pending_none();
+                        {
+                            JPH::BodyID seeker_body{};
+                            {
+                                auto [lock, reg] = m_entity_manager->get_registry();
+                                if (reg.all_of<Magic::RigidBody>(slot.seeker()))
+                                    seeker_body = reg.get<Magic::RigidBody>(slot.seeker()).id;
+                            }
+                            if (!seeker_body.IsInvalid())
+                            {
+                                Physics &physics = Magic::GetEngine().get_physics();
+                                JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
+                                bi.SetLinearAndAngularVelocity(seeker_body, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                                // Switch to Kinematic so active seekers cannot push this
+                                // finished body around while waiting for the round to end.
+                                bi.SetMotionType(seeker_body, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
+                            }
+                        }
+                        // Hide goals for this finished agent while others are still running.
+                        {
+                            auto [lock, reg] = m_entity_manager->get_registry();
+                            for (Entity goal : slot.goals)
+                                if (!reg.all_of<Magic::Hidden>(goal))
+                                    reg.emplace<Magic::Hidden>(goal);
+                        }
+                        slot.episode_done = true;
+                        slot.has_last_obs = false;
+                        continue;
+                    }
                 }
-                prev_done = done;
-
-                if (prev_done)
+                else
                 {
-                    m_env->reset();
+                    obs = slot.env->get_observation(static_cast<float>(dt));
+                }
 
-                    // Curriculum: remove boundary walls once the agent has enough experience.
-                    if (!m_walls_removed && m_env->episode_count() >= NavigationEnv::Curriculum::boundary_wall_episodes)
-                        remove_boundary_walls();
+                nb::object action_obj = m_step_func(obs, i);
+                int action = nb::cast<int>(action_obj);
+                slot.env->apply_action(action);
 
-                    // Random spawn position for the seeker.
-                    // Goals are randomized internally by NavigationEnv::reset().
-                    static std::mt19937 rng{std::random_device{}()};
-                    static std::uniform_real_distribution<float> dist(
-                        NavigationEnv::World::min * NavigationEnv::World::spawn_margin,
-                        NavigationEnv::World::max * NavigationEnv::World::spawn_margin);
+                slot.last_obs    = std::move(obs);
+                slot.last_action = action;
+                slot.has_last_obs = true;
+            }
 
-                    float sx = dist(rng), sz = dist(rng);
+            // Round complete: all agents have finished their episode.
+            // Reset everyone simultaneously so they all start the next
+            // episode together on the same frame.
+            bool all_done = !m_agents.empty() &&
+                std::all_of(m_agents.begin(), m_agents.end(),
+                    [](const AgentSlot &s){ return s.episode_done; });
 
-                    // Teleport the seeker (Jolt body) and zero its velocity.
+            if (all_done)
+            {
+                // Notify Python first so it can flush the PPO buffer before
+                // env state is overwritten by reset().
+                if (m_has_round_complete && m_round_complete_func)
+                    m_round_complete_func();
+
+                {
+                    int round = m_agents.empty() ? 1 : m_agents[0].env->episode_count() + 1;
+                    std::string msg = "Round " + std::to_string(round) + " complete";
+                    for (int a = 0; a < (int)m_agents.size(); ++a)
+                        msg += " | agent" + std::to_string(a) + "_eps=" + std::to_string(m_agents[a].env->episode_count());
+                    Debug::Log(msg);
+                }
+
+                // Seed all envs from the same value so goal positions are
+                // identical across agents each round.
+                uint32_t round_seed = rng();
+                for (auto &slot : m_agents)
+                    slot.env->seed_rng(round_seed);
+
+                for (auto &slot : m_agents)
+                {
+                    slot.env->reset();
+                    slot.episode_done = false;
+                    slot.has_last_obs = false;
+
+                    // Unhide goals for the new episode.
+                    {
+                        auto [lock, reg] = m_entity_manager->get_registry();
+                        for (Entity goal : slot.goals)
+                            reg.remove<Magic::Hidden>(goal);
+                    }
+
                     JPH::BodyID seeker_body{};
                     {
                         auto [lock, reg] = m_entity_manager->get_registry();
-                        if (reg.all_of<Magic::RigidBody>(m_seeker()))
-                            seeker_body = reg.get<Magic::RigidBody>(m_seeker()).id;
+                        if (reg.all_of<Magic::RigidBody>(slot.seeker()))
+                            seeker_body = reg.get<Magic::RigidBody>(slot.seeker()).id;
                     }
                     if (!seeker_body.IsInvalid())
                     {
                         Physics &physics = Magic::GetEngine().get_physics();
                         JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
+                        // Restore Dynamic motion before repositioning so the seeker
+                        // responds to physics (gravity, collisions) in the new episode.
+                        bi.SetMotionType(seeker_body, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
+                        float sx = dist(rng), sz = dist(rng);
                         bi.SetPositionAndRotation(seeker_body, JPH::RVec3(sx, 0.f, sz), JPH::Quat::sIdentity(), JPH::EActivation::Activate);
                         bi.SetLinearAndAngularVelocity(seeker_body, JPH::Vec3::sZero(), JPH::Vec3::sZero());
                     }
+                }
 
-                    // Defer the post-reset observation to the next frame so the
-                    // teleport cost isn't stacked on top of feedback/optimize.
-                    // The (1-done) term in the Bellman update means the stale
-                    // next_state on the terminal transition doesn't affect training.
-                    m_has_last_obs = false;
-                    return;
+                // Curriculum: remove boundary walls once enough total experience collected.
+                if (!m_walls_removed)
+                {
+                    int total_eps = 0;
+                    for (auto &s : m_agents) total_eps += s.env->episode_count();
+                    if (total_eps >= NavigationEnv::Curriculum::boundary_wall_episodes)
+                        remove_boundary_walls();
                 }
             }
-            else
-            {
-                obs = m_env->get_observation(static_cast<float>(dt));
-            }
-
-            if (!m_step_func)
-            {
-                throw std::runtime_error("Python step function not loaded");
-            }
-            nb::object action_obj = m_step_func(obs);
-            int action = nb::cast<int>(action_obj);
-            m_env->apply_action(action);
-
-            // Always record the obs/action we just acted on, including the
-            // fresh post-reset obs so the next frame can call feedback correctly.
-            m_last_obs    = std::move(obs);
-            m_last_action = action;
-            m_has_last_obs = true;
         }
         catch (nb::python_error &e)
         {
@@ -319,6 +465,8 @@ void LearnScene::remove_boundary_walls()
 
     m_boundary_walls.clear();
     m_walls_removed = true;
-    Debug::Log("Curriculum: boundary walls removed after episode " + std::to_string(m_env->episode_count()));
+    int total_eps = 0;
+    for (auto &s : m_agents) total_eps += s.env->episode_count();
+    Debug::Log("Curriculum: boundary walls removed after " + std::to_string(total_eps) + " total episodes");
 }
 

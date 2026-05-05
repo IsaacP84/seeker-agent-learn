@@ -124,7 +124,9 @@ void TestScene::onActivate()
     if (m_python_scene)
     {
         nb::gil_scoped_acquire acquire;
-        m_python_scene.attr("scene_env") = nb::cast(m_env.get(), nb::rv_policy::reference);
+        m_python_scene.attr("scene_env")  = nb::cast(m_env.get(), nb::rv_policy::reference);
+        // Clear any stale multi-agent env list from a previous LearnScene run.
+        m_python_scene.attr("scene_envs") = nb::list();
     }
 
     {

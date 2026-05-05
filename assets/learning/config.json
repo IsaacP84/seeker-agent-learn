@@ -1,7 +1,8 @@
 {
     "scene": "learn",
-    "is_training": false,
+    "is_training": true,
     "load_model": null,
+    "num_agents": 4,
     "checkpointing": {
         "rolling_mode": "compact",
         "max_history_entries": 2000,

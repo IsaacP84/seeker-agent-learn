@@ -24,8 +24,8 @@ class NavigationEnv
 public:
     struct Sizes
     {
-        static constexpr int num_states = 209;
-        static constexpr int num_actions = 7;
+        static constexpr int num_states = 210;
+        static constexpr int num_actions = 8;
         static constexpr int num_goals   = 3;
     };
 
@@ -102,11 +102,16 @@ public:
     using SightingBodyID = std::variant<JPH::BodyID, int>;
 
     void bind(Magic::EntityManager &em, Magic::Entity seeker, std::vector<Magic::Entity> goals);
+    void set_agent_id(int id) { m_agent_id = id; }
+    void set_ignored_bodies(std::vector<JPH::BodyID> ids) { m_ignored_bodies = std::move(ids); }
+    void set_pending_none() { m_pending_action = -1; } // maps to Seeker::NONE via default case
+    void seed_rng(uint32_t seed) { m_rng.seed(seed); }
 
     std::vector<float>                         reset();
     std::vector<float>                         get_observation(float dt);
     float                                      compute_reward();
-    bool                                       is_done() const;
+    bool                                       is_done() const;     // true on any termination (terminal or truncated)
+    bool                                       is_terminal() const; // true only for true terminal (fell off map)
     void                                       apply_action(int action);
     Seeker::Action                             pending_action() const;
     std::unordered_map<std::string, float>     get_env_data() const;
@@ -117,6 +122,7 @@ public:
 
 private:
     Magic::EntityManager *m_em     = nullptr;
+    int                   m_agent_id = -1;
     Magic::Entity         m_seeker = entt::null;
     std::vector<Goal>     m_goals;
 
@@ -134,6 +140,7 @@ private:
     float     m_current_goal_time_limit = Episode::max_goal_search_seconds;
     bool      m_done             = false;
     int       m_step_count      = 0;
+    int       m_goals_this_episode = 0;
     int       m_pending_action  = 0;
     int       m_prev_action     = -1; // -1 = no previous action (start of episode)
 
@@ -148,6 +155,8 @@ private:
 
     std::array<std::array<Sighting, SightingConstants::history>, Raycast::num_rays> m_sightings{};
     std::array<int, Raycast::num_rays>                                               m_sight_head{};
+
+    std::vector<JPH::BodyID> m_ignored_bodies; // other agents' seeker bodies — ignored by raycasts
 
     std::mt19937 m_rng{std::random_device{}()};
 };

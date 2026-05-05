@@ -232,6 +232,24 @@ struct SeekerRenderHandler
     }
 };
 
+// Track all seeker body IDs so contacts between seekers can be suppressed
+static std::vector<JPH::BodyID> s_seeker_body_ids;
+
+struct SeekerContactListener : public Magic::ContactListener
+{
+    void OnContactAdded(Magic::EntityManager &, Magic::Entity, const JPH::Body &inBody1, const JPH::Body &inBody2,
+                        const JPH::ContactManifold &, JPH::ContactSettings &ioSettings) override
+    {
+        auto is_seeker = [](JPH::BodyID id) {
+            for (const auto &sid : s_seeker_body_ids)
+                if (sid == id) return true;
+            return false;
+        };
+        if (is_seeker(inBody1.GetID()) && is_seeker(inBody2.GetID()))
+            ioSettings.mIsSensor = true;
+    }
+};
+
 namespace
 {
 
@@ -280,7 +298,7 @@ namespace
 
 } // namespace
 
-Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
+Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker_" + std::to_string(s_seeker_body_ids.size())))
 {
     // using Type = Magic::Handle::Type;
     auto &app = Magic::Application::get();
@@ -298,7 +316,7 @@ Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
     uh.on_move = chase_player;
     uh.on_jump = [](EntityManager &em, Entity e, double dt)
     {
-        LOG("JUMP");
+        // LOG("JUMP");
         auto [lock, reg] = ((const EntityManager &)em).get_registry();
         const auto &data = reg.get<Seeker::Data>(e);
 
@@ -310,12 +328,12 @@ Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
 
     uh.on_land = [](EntityManager &, Entity)
     {
-        LOG("LAND");
+        // LOG("LAND");
     };
 
     uh.on_shoot = [this](EntityManager &em, Entity e, double dt)
     {
-        LOG("shoot");
+        // LOG("shoot");
         //
         // UNSAFE
         //
@@ -360,7 +378,15 @@ Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
     JPH::BodyID body_id = body_interface.CreateAndAddBody(body_settings, JPH::EActivation::Activate);
     em.addComponent<Magic::RigidBody>(m_e, Magic::RigidBody{body_id});
 
+    s_seeker_body_ids.push_back(body_id);
+    em.addComponent<Magic::ContactListenerComponent>(m_e, SeekerContactListener{});
+
     // sphere_id = body_interface.CreateAndAddBody(sphere_settings, JPH::EActivation::Activate);
+}
+
+void Seeker::ClearBodyIds()
+{
+    s_seeker_body_ids.clear();
 }
 
 // grab
