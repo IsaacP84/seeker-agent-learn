@@ -24,7 +24,7 @@ import Magic
 
 DATE_FORMAT = "%m-%d %H:%M:%S"
 
-ACTION_NAMES = ['Forward', 'Backward', 'Strafe L', 'Strafe R', 'Turn L', 'Turn R', 'Jump']
+ACTION_NAMES = ['Forward', 'Backward', 'Strafe L', 'Strafe R', 'Turn L', 'Turn R', 'Jump', 'Idle']
 
 RUNS_DIR = "runs"
 os.makedirs(RUNS_DIR, exist_ok=True)
@@ -552,20 +552,16 @@ class Agent:
 
                 self.optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm_pre_clip = torch.nn.utils.clip_grad_norm_(
                     list(self.actor.parameters()) + list(self.critic.parameters()),
                     self.max_grad_norm
-                )
+                ).item()
                 self.optimizer.step()
 
                 with torch.no_grad():
                     clip_frac  = ((ratio - 1.0).abs() > self.clip_epsilon).float().mean().item()
                     approx_kl  = (old_lp_b - new_log_prob).mean().item()
-                    total_norm = sum(
-                        p.grad.data.norm(2).item() ** 2
-                        for p in list(self.actor.parameters()) + list(self.critic.parameters())
-                        if p.grad is not None
-                    ) ** 0.5
+                    total_norm = grad_norm_pre_clip
 
                 self._episode_pg_losses.append(pg_loss.item())
                 self._episode_value_losses.append(value_loss.item())
@@ -624,6 +620,7 @@ class Agent:
         # Data is per-round (one entry per round, already aggregated across agents).
         roll_window   = 100
         action_window = 100
+        rounds = np.arange(1, n + 1)  # 1-based round numbers for x-axis
 
         def rolling_mean(data, window=100):
             arr = np.array(data, dtype=float)
@@ -645,15 +642,15 @@ class Agent:
         # ── (0,0) Reward + Curriculum ──────────────────────────────────────────
         ax = axes[0, 0]
         rewards = np.array(self.rewards_per_episode, dtype=float)
-        ax.plot(rewards, alpha=0.3, color='tab:blue', linewidth=0.8)
-        ax.plot(rolling_mean(rewards, roll_window), color='tab:blue', label=f'{roll_window}-round mean')
+        ax.plot(rounds, rewards, alpha=0.3, color='tab:blue', linewidth=0.8)
+        ax.plot(rounds, rolling_mean(rewards, roll_window), color='tab:blue', label=f'{roll_window}-round mean')
         ax.set_ylabel('Mean Reward', color='tab:blue')
         ax.tick_params(axis='y', labelcolor='tab:blue')
         ax.set_xlabel('Round')
         ax.set_title('Reward + Curriculum')
         if self.goal_time_limit_history:
             ax2 = ax.twinx()
-            ax2.plot(self.goal_time_limit_history, color='tab:orange', alpha=0.6)
+            ax2.plot(rounds, self.goal_time_limit_history, color='tab:orange', alpha=0.6)
             ax2.set_ylabel('Time Limit (s)', color='tab:orange', labelpad=10)
             ax2.tick_params(axis='y', labelcolor='tab:orange')
             if self._env is not None:
@@ -667,8 +664,8 @@ class Agent:
         ax = axes[0, 1]
         if self.episode_length_history:
             lengths = np.array(self.episode_length_history, dtype=float)
-            ax.plot(lengths, alpha=0.3, color='tab:purple', linewidth=0.8)
-            ax.plot(rolling_mean(lengths, roll_window), color='tab:purple')
+            ax.plot(rounds, lengths, alpha=0.3, color='tab:purple', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(lengths, roll_window), color='tab:purple')
         ax.set_ylabel('Steps / Episode')
         ax.set_xlabel('Round')
         ax.set_title('Episode Length')
@@ -677,8 +674,8 @@ class Agent:
         ax = axes[0, 2]
         if self.goal_reach_history:
             goals = np.array(self.goal_reach_history, dtype=float)
-            ax.plot(goals, alpha=0.3, color='tab:green', linewidth=0.8)
-            ax.plot(rolling_mean(goals, roll_window), color='tab:green')
+            ax.plot(rounds, goals, alpha=0.3, color='tab:green', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(goals, roll_window), color='tab:green')
         ax.set_ylabel('Goals / Agent')
         ax.set_xlabel('Round')
         ax.set_title('Goal-Find Rate (per agent)')
@@ -687,8 +684,8 @@ class Agent:
         ax = axes[1, 0]
         if self.pg_loss_history:
             pg = np.array(self.pg_loss_history, dtype=float)
-            ax.plot(pg, alpha=0.3, color='tab:red', linewidth=0.8)
-            ax.plot(rolling_mean(pg, roll_window), color='tab:red')
+            ax.plot(rounds, pg, alpha=0.3, color='tab:red', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(pg, roll_window), color='tab:red')
         ax.set_ylabel('PG Loss')
         ax.set_xlabel('Round')
         ax.set_title('Policy Gradient Loss')
@@ -698,8 +695,8 @@ class Agent:
         ax = axes[1, 1]
         if self.value_loss_history:
             vf = np.array(self.value_loss_history, dtype=float)
-            ax.plot(vf, alpha=0.3, color='tab:blue', linewidth=0.8)
-            ax.plot(rolling_mean(vf, roll_window), color='tab:blue')
+            ax.plot(rounds, vf, alpha=0.3, color='tab:blue', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(vf, roll_window), color='tab:blue')
         ax.set_ylabel('Value Loss')
         ax.set_xlabel('Round')
         ax.set_title('Value Function Loss')
@@ -708,8 +705,8 @@ class Agent:
         ax = axes[1, 2]
         if self.gradient_norm_history:
             gnorm = np.array(self.gradient_norm_history, dtype=float)
-            ax.plot(gnorm, alpha=0.3, color='tab:brown', linewidth=0.8)
-            ax.plot(rolling_mean(gnorm, roll_window), color='tab:brown')
+            ax.plot(rounds, gnorm, alpha=0.3, color='tab:brown', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(gnorm, roll_window), color='tab:brown')
         ax.set_ylabel('Gradient L2 Norm')
         ax.set_xlabel('Round')
         ax.set_title('Gradient Norm')
@@ -718,8 +715,8 @@ class Agent:
         ax = axes[2, 0]
         if self.entropy_history:
             ent = np.array(self.entropy_history, dtype=float)
-            ax.plot(ent, alpha=0.3, color='tab:cyan', linewidth=0.8)
-            ax.plot(rolling_mean(ent, roll_window), color='tab:cyan')
+            ax.plot(rounds, ent, alpha=0.3, color='tab:cyan', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(ent, roll_window), color='tab:cyan')
         ax.set_ylabel('Policy Entropy')
         ax.set_xlabel('Round')
         ax.set_title('Entropy (exploration)')
@@ -729,14 +726,14 @@ class Agent:
         if self.clip_frac_history:
             cf  = np.array(self.clip_frac_history, dtype=float)
             kl  = np.array(self.approx_kl_history, dtype=float)
-            ax.plot(cf, alpha=0.3, color='tab:orange', linewidth=0.8)
-            ax.plot(rolling_mean(cf,  roll_window), color='tab:orange', label='Clip frac')
+            ax.plot(rounds, cf, alpha=0.3, color='tab:orange', linewidth=0.8)
+            ax.plot(rounds, rolling_mean(cf,  roll_window), color='tab:orange', label='Clip frac')
             ax2 = ax.twinx()
             # Only plot raw KL clipped to 3× the rolling-mean range to suppress early spikes.
             kl_smooth = rolling_mean(kl, roll_window)
             kl_cap = max(kl_smooth.max() * 3.0, 0.01)
-            ax2.plot(np.clip(kl, 0, kl_cap), alpha=0.3, color='tab:pink', linewidth=0.8)
-            ax2.plot(kl_smooth, color='tab:pink',   label='Approx KL', linestyle='--')
+            ax2.plot(rounds, np.clip(kl, 0, kl_cap), alpha=0.3, color='tab:pink', linewidth=0.8)
+            ax2.plot(rounds, kl_smooth, color='tab:pink',   label='Approx KL', linestyle='--')
             ax.set_ylabel('Clip Fraction', color='tab:orange')
             ax2.set_ylabel('Approx KL',    color='tab:pink')
             ax.tick_params(axis='y', labelcolor='tab:orange')

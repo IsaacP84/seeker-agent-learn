@@ -24,8 +24,8 @@ class NavigationEnv
 public:
     struct Sizes
     {
-        static constexpr int num_states = 209;
-        static constexpr int num_actions = 7;
+        static constexpr int num_states = 210;
+        static constexpr int num_actions = 8;
         static constexpr int num_goals   = 3;
     };
 

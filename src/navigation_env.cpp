@@ -568,6 +568,8 @@ Seeker::Action NavigationEnv::pending_action() const
         return Seeker::TURN_RIGHT;
     case 6:
         return Seeker::JUMP;
+    case 7:
+        return Seeker::NONE;
     default:
         return Seeker::NONE;
     }
