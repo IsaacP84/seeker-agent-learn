@@ -49,6 +49,7 @@ public:
 
     void shoot(Magic::EntityManager &em, Magic::Camera &cam);
     static void LoadModel();
+    static void ClearBodyIds();
 
 
     // get state

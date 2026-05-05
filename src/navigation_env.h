@@ -102,6 +102,8 @@ public:
     using SightingBodyID = std::variant<JPH::BodyID, int>;
 
     void bind(Magic::EntityManager &em, Magic::Entity seeker, std::vector<Magic::Entity> goals);
+    void set_ignored_bodies(std::vector<JPH::BodyID> ids) { m_ignored_bodies = std::move(ids); }
+    void set_pending_none() { m_pending_action = -1; } // maps to Seeker::NONE via default case
 
     std::vector<float>                         reset();
     std::vector<float>                         get_observation(float dt);
@@ -148,6 +150,8 @@ private:
 
     std::array<std::array<Sighting, SightingConstants::history>, Raycast::num_rays> m_sightings{};
     std::array<int, Raycast::num_rays>                                               m_sight_head{};
+
+    std::vector<JPH::BodyID> m_ignored_bodies; // other agents' seeker bodies — ignored by raycasts
 
     std::mt19937 m_rng{std::random_device{}()};
 };
