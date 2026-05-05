@@ -14,6 +14,7 @@
 #include <Magic!/components/physics.hpp>
 #include <Magic!/components/renderable.hpp>
 #include <Magic!/components/events.hpp>
+#include <Magic!/components/tags.hpp>
 
 #include <Magic!/render/meshes/cube.hpp>
 
@@ -54,8 +55,29 @@ void LearnScene::onCreate()
     Seeker::LoadModel();
 }
 
+void LearnScene::_clear_python_env_refs()
+{
+    if (!m_python_scene)
+        return;
+    nb::gil_scoped_acquire acquire;
+    try
+    {
+        m_python_scene.attr("scene_env")  = nb::none();
+        m_python_scene.attr("scene_envs") = nb::list();
+        if (nb::hasattr(m_python_scene, "scene_agent"))
+        {
+            auto agent = m_python_scene.attr("scene_agent");
+            agent.attr("_env") = nb::none();
+        }
+        // Force a GC pass so cyclic references don't keep wrappers alive.
+        nb::module_::import_("gc").attr("collect")();
+    }
+    catch (...) {}
+}
+
 void LearnScene::onDestroy()
 {
+    _clear_python_env_refs();
 }
 
 void LearnScene::onActivate()
@@ -131,6 +153,8 @@ void LearnScene::onActivate()
     m_walls_removed = false;
 
     // ---- Per-agent slots: goals + seeker + env ----
+    // Each agent has its own goal entities but they are placed at the same
+    // initial positions so all agents start with an equivalent layout.
     m_agents.clear();
     m_agents.reserve(m_num_agents);
     for (int a = 0; a < m_num_agents; ++a)
@@ -138,11 +162,11 @@ void LearnScene::onActivate()
         AgentSlot &slot = m_agents.emplace_back();
         slot.env = std::make_unique<NavigationEnv>();
 
-        // Goals for this agent.
+        // Goals for this agent — same initial positions for every agent.
         for (int g = 0; g < NavigationEnv::Sizes::num_goals; ++g)
         {
             std::string name = "Goal_a" + std::to_string(a) + "_g" + std::to_string(g);
-            Entity goal = em.create(name, {Vec3{3.f * (g + 1), 0.5f, 3.f * (a + 1)}});
+            Entity goal = em.create(name, {Vec3{3.f * (g + 1), 0.5f, 3.f}});
             RenderObject goal_ro = rm.copy("cool_box");
             goal_ro.model(rm.copy(goal_ro.handle()));
             em.addComponent<Magic::RenderObject>(goal, goal_ro);
@@ -151,6 +175,7 @@ void LearnScene::onActivate()
 
         slot.seeker = Seeker(*m_entity_manager);
         slot.env->bind(*m_entity_manager, slot.seeker(), slot.goals);
+        slot.env->set_agent_id(a);
 
         // Wire the seeker callback to this slot's env.
         {
@@ -200,6 +225,9 @@ void LearnScene::onDeactivate()
 {
     Application::get().use_locked_simulation_speed(true);
     Application::get().SetRelativeMouseMode(false);
+
+    _clear_python_env_refs();
+
     m_entity_manager->clear();
     m_agents.clear();
     m_boundary_walls.clear(); // already freed by clear() above
@@ -272,7 +300,17 @@ void LearnScene::update(double dt)
                                 Physics &physics = Magic::GetEngine().get_physics();
                                 JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
                                 bi.SetLinearAndAngularVelocity(seeker_body, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                                // Switch to Kinematic so active seekers cannot push this
+                                // finished body around while waiting for the round to end.
+                                bi.SetMotionType(seeker_body, JPH::EMotionType::Kinematic, JPH::EActivation::DontActivate);
                             }
+                        }
+                        // Hide goals for this finished agent while others are still running.
+                        {
+                            auto [lock, reg] = m_entity_manager->get_registry();
+                            for (Entity goal : slot.goals)
+                                if (!reg.all_of<Magic::Hidden>(goal))
+                                    reg.emplace<Magic::Hidden>(goal);
                         }
                         slot.episode_done = true;
                         slot.has_last_obs = false;
@@ -307,11 +345,32 @@ void LearnScene::update(double dt)
                 if (m_has_round_complete && m_round_complete_func)
                     m_round_complete_func();
 
+                {
+                    int round = m_agents.empty() ? 1 : m_agents[0].env->episode_count() + 1;
+                    std::string msg = "Round " + std::to_string(round) + " complete";
+                    for (int a = 0; a < (int)m_agents.size(); ++a)
+                        msg += " | agent" + std::to_string(a) + "_eps=" + std::to_string(m_agents[a].env->episode_count());
+                    Debug::Log(msg);
+                }
+
+                // Seed all envs from the same value so goal positions are
+                // identical across agents each round.
+                uint32_t round_seed = rng();
+                for (auto &slot : m_agents)
+                    slot.env->seed_rng(round_seed);
+
                 for (auto &slot : m_agents)
                 {
                     slot.env->reset();
                     slot.episode_done = false;
                     slot.has_last_obs = false;
+
+                    // Unhide goals for the new episode.
+                    {
+                        auto [lock, reg] = m_entity_manager->get_registry();
+                        for (Entity goal : slot.goals)
+                            reg.remove<Magic::Hidden>(goal);
+                    }
 
                     JPH::BodyID seeker_body{};
                     {
@@ -323,6 +382,9 @@ void LearnScene::update(double dt)
                     {
                         Physics &physics = Magic::GetEngine().get_physics();
                         JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
+                        // Restore Dynamic motion before repositioning so the seeker
+                        // responds to physics (gravity, collisions) in the new episode.
+                        bi.SetMotionType(seeker_body, JPH::EMotionType::Dynamic, JPH::EActivation::DontActivate);
                         float sx = dist(rng), sz = dist(rng);
                         bi.SetPositionAndRotation(seeker_body, JPH::RVec3(sx, 0.f, sz), JPH::Quat::sIdentity(), JPH::EActivation::Activate);
                         bi.SetLinearAndAngularVelocity(seeker_body, JPH::Vec3::sZero(), JPH::Vec3::sZero());

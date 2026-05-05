@@ -78,6 +78,29 @@ class RolloutBuffer:
         self._ptr  = 0
         self._size = 0
 
+    def snapshot(self):
+        """Return a deep copy of this buffer's current data.
+
+        The copy owns its own tensors so the worker thread can read it
+        safely while the main thread continues writing to self.
+        """
+        snap = RolloutBuffer(self.n_steps, device=self.device)
+        snap._ptr  = self._ptr
+        snap._size = self._size
+        if self._obs is not None:
+            n = self._size
+            snap._obs       = self._obs[:n].clone()
+            snap._actions   = self._actions[:n].clone()
+            snap._rewards   = self._rewards[:n].clone()
+            snap._dones     = self._dones[:n].clone()
+            snap._log_probs = self._log_probs[:n].clone()
+            snap._values    = self._values[:n].clone()
+            snap._agent_ids = self._agent_ids[:n].clone() if self._agent_ids is not None else None
+            # Resize internal storage to match snapshot size so indexing is consistent.
+            snap.n_steps = n
+            snap._ptr    = 0   # snapshot is treated as full / read-only
+        return snap
+
     def compute_advantages(self, last_value, gamma, gae_lambda):
         """Compute GAE-Lambda advantages and discounted returns.
 

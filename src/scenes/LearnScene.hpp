@@ -53,5 +53,6 @@ private:
     bool m_is_training = true;
 
     void remove_boundary_walls();
+    void _clear_python_env_refs();
 };
 

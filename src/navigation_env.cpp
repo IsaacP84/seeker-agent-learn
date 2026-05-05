@@ -57,6 +57,7 @@ std::vector<float> NavigationEnv::reset()
     Debug::Log("NavigationEnv reset");
     ++m_episode_count;
     m_step_count       = 0;
+    m_goals_this_episode = 0;
     m_elapsed_seconds  = 0.f;
     m_time_since_goal  = 0.f;
     m_done             = false;
@@ -450,6 +451,9 @@ float NavigationEnv::compute_reward()
         m_goals[nearest_idx].pos.z = rdist(m_rng);
         if (m_goals[nearest_idx].entity != entt::null && reg.all_of<Transform>(m_goals[nearest_idx].entity))
             reg.get<Transform>(m_goals[nearest_idx].entity).pos = m_goals[nearest_idx].pos;
+
+        Debug::Log("Seeker_" + std::to_string(m_agent_id) + " collected goal " + std::to_string(nearest_idx) +
+                   " (goals this episode: " + std::to_string(++m_goals_this_episode) + ")");
 
         // Update prev_distance to nearest remaining goal after relocation.
         float new_nearest = std::numeric_limits<float>::max();

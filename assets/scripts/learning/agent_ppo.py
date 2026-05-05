@@ -4,6 +4,8 @@ print(sys.path)
 
 import os
 import shutil
+import threading
+import time
 from datetime import datetime
 import argparse
 
@@ -144,6 +146,12 @@ class Agent:
 
         self._last_log_probs = {}  # keyed by agent_id
         self._last_values    = {}  # keyed by agent_id
+        self._steps_since_ppo = 0  # steps added to buffer since last _run_ppo_update
+
+        # Background PPO worker thread — update runs off the main game thread
+        # so the C++ loop is not stalled during the 160-step gradient descent.
+        self._ppo_lock          = threading.Lock()   # guards actor/critic writes
+        self._ppo_worker        = None               # current worker thread (or None)
 
         # Per-agent episode accumulators (keyed by agent_id; reset when agent's episode ends)
         self._agent_slots          = {}
@@ -329,6 +337,7 @@ class Agent:
             value    = self._last_values.get(agent_id, 0.0),
             agent_id = agent_id,
         )
+        self._steps_since_ppo += 1
 
         # Flush when buffer is full (rollout complete — truncated bootstrap)
         _flushed_full = False
@@ -336,116 +345,179 @@ class Agent:
             with torch.no_grad():
                 ns_t     = torch.tensor(next_state, dtype=torch.float32, device=device)
                 last_val = self.critic(ns_t.unsqueeze(0)).squeeze().item()
-            self._run_ppo_update(last_val)
+            self._run_ppo_update_async(last_val)
             _flushed_full = True
 
         # Single-agent only: flush on episode end if the buffer has partial data.
-        # With multiple agents the buffer is shared — flushing mid-episode on
-        # one agent's done signal discards in-progress transitions from the
-        # other agents. With num_agents > 1 we rely solely on the full-buffer
-        # flush above; the done flags already in the buffer let GAE handle
-        # episode boundaries correctly via next_non_terminal masking.
         if self.num_agents == 1 and done_b and not _flushed_full and self.buffer._size > 0:
             with torch.no_grad():
                 ns_t     = torch.tensor(next_state, dtype=torch.float32, device=device)
                 last_val = self.critic(ns_t.unsqueeze(0)).squeeze().item()
-            self._run_ppo_update(last_val)
-
-        if done_b:
-            self.rewards_per_episode.append(slot['reward'])
-            current_limit = (
-                self._env.get_env_data()['current_goal_time_limit']
-                if self._env is not None else 0.0
-            )
-            self.goal_time_limit_history.append(current_limit)
-
-            self.action_dist_history.append(list(slot['action_counts']))
-            self.episode_length_history.append(slot['steps'])
-            self.goal_reach_history.append(slot['goals'])
-            self.pg_loss_history.append(
-                float(np.mean(self._episode_pg_losses))    if self._episode_pg_losses    else (self.pg_loss_history[-1]    if self.pg_loss_history    else 0.0))
-            self.value_loss_history.append(
-                float(np.mean(self._episode_value_losses)) if self._episode_value_losses else (self.value_loss_history[-1] if self.value_loss_history else 0.0))
-            self.entropy_history.append(
-                float(np.mean(self._episode_entropies))    if self._episode_entropies    else (self.entropy_history[-1]    if self.entropy_history    else 0.0))
-            self.clip_frac_history.append(
-                float(np.mean(self._episode_clip_fracs))   if self._episode_clip_fracs   else (self.clip_frac_history[-1]  if self.clip_frac_history  else 0.0))
-            self.approx_kl_history.append(
-                float(np.mean(self._episode_approx_kls))   if self._episode_approx_kls   else (self.approx_kl_history[-1]  if self.approx_kl_history  else 0.0))
-            mean_grad = float(np.mean(self._gradient_norms)) if self._gradient_norms else (self.gradient_norm_history[-1] if self.gradient_norm_history else 0.0)
-            self.gradient_norm_history.append(mean_grad)
-            episode = len(self.rewards_per_episode)
-            msg = (
-                f'Episode {episode:4d} | agent={agent_id} | '
-                f'reward={self.rewards_per_episode[-1]:8.2f} | '
-                f'goal_limit={current_limit:.1f}s | '
-                f'steps={slot["steps"]:4d} | '
-                f'goals={slot["goals"]} | '
-                f'pg={self.pg_loss_history[-1]:.4f} | '
-                f'vf={self.value_loss_history[-1]:.4f} | '
-                f'ent={self.entropy_history[-1]:.4f} | '
-                f'kl={self.approx_kl_history[-1]:.4f} | '
-                f'clip={self.clip_frac_history[-1]:.3f} | '
-                f'grad={mean_grad:.3f}'
-            )
-            log_message(self.LOG_FILE, msg)
-
-            if slot['obs_stats']:
-                stds = [s[1] for s in slot['obs_stats']]
-                if np.mean(stds) < 1e-5:
-                    log_message(self.LOG_FILE,
-                        f'  [OBS WARNING] Episode {episode} agent {agent_id}: very low obs std ({np.mean(stds):.2e})')
-
-            # Reset this agent's per-episode accumulators.
-            self._agent_slots[agent_id] = {
-                'reward': 0.0, 'steps': 0,
-                'action_counts': [0] * self.num_actions,
-                'goals': 0, 'obs_stats': [],
-            }
-            # Reset global PPO loss accumulators only after they've been recorded.
-            # With multiple agents, only the first agent to finish after a PPO update
-            # has real values. Subsequent agents in the same cycle get the same values
-            # (already recorded above) rather than 0.0. Clearing an already-empty list
-            # is a no-op, so single-agent behaviour is unchanged.
-            if self._episode_pg_losses:
-                self._episode_pg_losses    = []
-                self._episode_value_losses = []
-                self._episode_entropies    = []
-                self._episode_clip_fracs   = []
-                self._episode_approx_kls   = []
-                self._gradient_norms       = []
-
-            if self.scheduler is not None:
-                self.scheduler.step()
-
-            if episode % (10 * self.num_agents) == 0:
-                self.save_graph()
-                self._save_checkpoint()
+            self._run_ppo_update_async(last_val)
 
     # ------------------------------------------------------------------
     def on_round_complete(self):
         """Called by C++ when all agents have finished their episode.
-        Flushes remaining rollout buffer data as a PPO update.
-        All agents are done so last_value=0.0 is correct; the per-agent GAE
-        in the buffer will additionally zero out any agent whose last stored
-        transition already had done=True.
-        Skip the update if the buffer is too small to fill even one mini-batch
-        — this happens when a full-buffer flush fired just before round end."""
-        if self.is_training and self.buffer._size >= self.mini_batch_size:
-            self._run_ppo_update(last_value=0.0)
+
+        1. Flush any remaining rollout buffer data as a PPO update.
+        2. Aggregate per-agent episode stats across all agents for this round.
+        3. Log a single round-summary line and update diagnostic histories.
+        4. Reset all per-agent accumulators and PPO loss accumulators.
+        5. Step LR scheduler and save graph/checkpoint on schedule.
+        """
+        # -- 1. PPO flush (only if enough new data since last update) --
+        min_steps = self.mini_batch_size * max(self.num_agents, 1)
+        if self.is_training and self._steps_since_ppo >= min_steps:
+            self._run_ppo_update_async(last_value=0.0)
+
+        # Wait for any in-flight PPO worker to finish so loss values are
+        # available when we build the log line and graph below.
+        if self._ppo_worker is not None and self._ppo_worker.is_alive():
+            self._ppo_worker.join()
+
+        if not self._agent_slots:
+            return
+
+        # -- 2. Aggregate stats across all agent slots for this round --
+        all_rewards = [s['reward'] for s in self._agent_slots.values()]
+        all_steps   = [s['steps']  for s in self._agent_slots.values()]
+        all_goals   = [s['goals']  for s in self._agent_slots.values()]
+        combined_actions = [
+            sum(s['action_counts'][i] for s in self._agent_slots.values())
+            for i in range(self.num_actions)
+        ]
+
+        mean_reward = float(np.mean(all_rewards))
+        mean_steps  = float(np.mean(all_steps))
+        total_goals = int(sum(all_goals))
+        mean_goals  = float(np.mean(all_goals))
+        current_limit = (
+            self._env.get_env_data()['current_goal_time_limit']
+            if self._env is not None else 0.0
+        )
+
+        self.rewards_per_episode.append(mean_reward)
+        self.goal_time_limit_history.append(current_limit)
+        self.action_dist_history.append(combined_actions)
+        self.episode_length_history.append(int(mean_steps))
+        self.goal_reach_history.append(mean_goals)
+
+        def _last_or(hist, default=0.0):
+            return hist[-1] if hist else default
+
+        self.pg_loss_history.append(
+            float(np.mean(self._episode_pg_losses))    if self._episode_pg_losses    else _last_or(self.pg_loss_history))
+        self.value_loss_history.append(
+            float(np.mean(self._episode_value_losses)) if self._episode_value_losses else _last_or(self.value_loss_history))
+        self.entropy_history.append(
+            float(np.mean(self._episode_entropies))    if self._episode_entropies    else _last_or(self.entropy_history))
+        self.clip_frac_history.append(
+            float(np.mean(self._episode_clip_fracs))   if self._episode_clip_fracs   else _last_or(self.clip_frac_history))
+        self.approx_kl_history.append(
+            float(np.mean(self._episode_approx_kls))   if self._episode_approx_kls   else _last_or(self.approx_kl_history))
+        mean_grad = float(np.mean(self._gradient_norms)) if self._gradient_norms else _last_or(self.gradient_norm_history)
+        self.gradient_norm_history.append(mean_grad)
+        # True when we have fresh loss values from a completed rollout this round.
+        has_fresh_losses = bool(self._episode_pg_losses)
+
+        round_num = len(self.rewards_per_episode)
+
+        # -- 3. Log round summary --
+        agent_rewards_str = ' '.join(f'{r:.2f}' for r in all_rewards)
+        msg = (
+            f'Round {round_num:4d} | '
+            f'mean_reward={mean_reward:8.2f} | [{agent_rewards_str}] | '
+            f'goal_limit={current_limit:.1f}s | '
+            f'mean_steps={mean_steps:.0f} | '
+            f'goals={total_goals} (mean/agent={mean_goals:.2f})'
+            + (f' | pg={self.pg_loss_history[-1]:.4f}'
+               f' | vf={self.value_loss_history[-1]:.4f}'
+               f' | ent={self.entropy_history[-1]:.4f}'
+               f' | kl={self.approx_kl_history[-1]:.4f}'
+               f' | clip={self.clip_frac_history[-1]:.3f}'
+               f' | grad={mean_grad:.3f}'
+               if has_fresh_losses else ' | (no rollout this round)')
+        )
+        log_message(self.LOG_FILE, msg)
+
+        for agent_id, slot in self._agent_slots.items():
+            if slot['obs_stats']:
+                stds = [s[1] for s in slot['obs_stats']]
+                if np.mean(stds) < 1e-5:
+                    log_message(self.LOG_FILE,
+                        f'  [OBS WARNING] Round {round_num} agent {agent_id}: very low obs std ({np.mean(stds):.2e})')
+
+        # -- 4. Reset accumulators --
+        self._agent_slots          = {}
+        self._episode_pg_losses    = []
+        self._episode_value_losses = []
+        self._episode_entropies    = []
+        self._episode_clip_fracs   = []
+        self._episode_approx_kls   = []
+        self._gradient_norms       = []
+
+        # -- 5. Scheduler + checkpoint/graph --
+        # Step once per agent-episode to preserve the same LR decay rate as
+        # the original per-episode stepping (T_max was already scaled by num_agents).
+        if self.scheduler is not None:
+            for _ in range(self.num_agents):
+                self.scheduler.step()
+
+        self.save_graph()
+        if round_num % 5 == 0:
+            self._save_checkpoint()
 
     # ------------------------------------------------------------------
-    def _run_ppo_update(self, last_value):
-        """Run PPO update epochs over the current rollout buffer."""
-        adv, ret = self.buffer.prepare(last_value, self.discount_factor_g, self.gae_lambda)
+    def _run_ppo_update_async(self, last_value):
+        """Snapshot the buffer and run the PPO update on a background thread.
+
+        If a previous update is still running we wait for it first — this
+        prevents a second update from reading the shared buffer/model while
+        the first is still writing to the weights.  In practice the training
+        time (~160 gradient steps) is well under one rollout (~1024 steps @
+        4 agents), so the wait should be near-zero.
+        """
+        if self._ppo_worker is not None and self._ppo_worker.is_alive():
+            # Previous update hasn't finished — wait so we don't stomp it.
+            t_wait_start = time.perf_counter()
+            self._ppo_worker.join()
+            wait_ms = (time.perf_counter() - t_wait_start) * 1000.0
+            log_message(self.LOG_FILE, f'[PPO] waited {wait_ms:.1f}ms for previous worker to finish')
+
+        # Snapshot the buffer contents for the worker thread.
+        # buffer.prepare() + get_batches() only reads from this snapshot, so
+        # the main thread can keep adding new steps while training runs.
+        t_snap_start = time.perf_counter()
+        buf_snapshot = self.buffer.snapshot()
+        snap_ms = (time.perf_counter() - t_snap_start) * 1000.0
+        self.buffer.clear()
+        self._steps_since_ppo = 0
+        log_message(self.LOG_FILE,
+            f'[PPO] rollout start | buf_size={buf_snapshot._size} | snapshot={snap_ms:.1f}ms')
+
+        def _worker():
+            t0 = time.perf_counter()
+            with self._ppo_lock:
+                self._run_ppo_update(last_value, buf_snapshot)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            log_message(self.LOG_FILE, f'[PPO] rollout done  | elapsed={elapsed_ms:.0f}ms')
+
+        self._ppo_worker = threading.Thread(target=_worker, daemon=True)
+        self._ppo_worker.start()
+
+    # ------------------------------------------------------------------
+    def _run_ppo_update(self, last_value, buffer=None):
+        """Run PPO update epochs over the given buffer snapshot (or self.buffer)."""
+        buf = buffer if buffer is not None else self.buffer
+        adv, ret = buf.prepare(last_value, self.discount_factor_g, self.gae_lambda)
 
         # Normalize advantages and write back so get_batches sees the normalized values.
         # (prepare() stores raw advantages on buffer._advantages; get_batches reads from there.)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        self.buffer._advantages = adv
+        buf._advantages = adv
 
         for _ in range(self.n_epochs):
-            for batch in self.buffer.get_batches(self.mini_batch_size):
+            for batch in buf.get_batches(self.mini_batch_size):
                 obs_b    = batch['obs']
                 act_b    = batch['actions']
                 old_lp_b = batch['log_probs']
@@ -502,7 +574,8 @@ class Agent:
                 self._episode_approx_kls.append(approx_kl)
                 self._gradient_norms.append(total_norm)
 
-        self.buffer.clear()
+        # buffer.clear() and _steps_since_ppo reset are handled by
+        # _run_ppo_update_async before the thread starts.
 
     # ------------------------------------------------------------------
     def _save_checkpoint(self):
@@ -548,11 +621,9 @@ class Agent:
         if n == 0:
             return
 
-        # Scale the rolling window so "100-ep mean" spans the same per-agent
-        # episode count regardless of how many agents are running.
-        roll_window   = 100 * self.num_agents
-        action_window = 100 * self.num_agents
-        per_agent_ep  = n // max(self.num_agents, 1)
+        # Data is per-round (one entry per round, already aggregated across agents).
+        roll_window   = 100
+        action_window = 100
 
         def rolling_mean(data, window=100):
             arr = np.array(data, dtype=float)
@@ -568,22 +639,22 @@ class Agent:
         fig, axes = plt.subplots(3, 3, figsize=(21, 13))
         fig.suptitle(
             f'PPO Diagnostics — {self.hyperparameter_set}  '
-            f'(ep {n} total | ~{per_agent_ep} per agent | {self.num_agents} agents)',
+            f'(round {n} | {self.num_agents} agents)',
             fontsize=13)
 
         # ── (0,0) Reward + Curriculum ──────────────────────────────────────────
         ax = axes[0, 0]
-        ax.plot(rolling_mean(self.rewards_per_episode, roll_window), color='tab:blue', label=f'{roll_window}-ep mean')
+        rewards = np.array(self.rewards_per_episode, dtype=float)
+        ax.plot(rewards, alpha=0.3, color='tab:blue', linewidth=0.8)
+        ax.plot(rolling_mean(rewards, roll_window), color='tab:blue', label=f'{roll_window}-round mean')
         ax.set_ylabel('Mean Reward', color='tab:blue')
         ax.tick_params(axis='y', labelcolor='tab:blue')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Reward + Curriculum')
         if self.goal_time_limit_history:
             ax2 = ax.twinx()
-            offset = n - len(self.goal_time_limit_history)
-            ax2.plot(range(offset, offset + len(self.goal_time_limit_history)),
-                     self.goal_time_limit_history, color='tab:orange', alpha=0.6)
-            ax2.set_ylabel('Goal Time Limit (s)', color='tab:orange')
+            ax2.plot(self.goal_time_limit_history, color='tab:orange', alpha=0.6)
+            ax2.set_ylabel('Time Limit (s)', color='tab:orange', labelpad=10)
             ax2.tick_params(axis='y', labelcolor='tab:orange')
             if self._env is not None:
                 cfg = self._env.get_config_data()
@@ -599,7 +670,7 @@ class Agent:
             ax.plot(lengths, alpha=0.3, color='tab:purple', linewidth=0.8)
             ax.plot(rolling_mean(lengths, roll_window), color='tab:purple')
         ax.set_ylabel('Steps / Episode')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Episode Length')
 
         # ── (0,2) Goals Reached ─────────────────────────────────────────────────
@@ -608,9 +679,9 @@ class Agent:
             goals = np.array(self.goal_reach_history, dtype=float)
             ax.plot(goals, alpha=0.3, color='tab:green', linewidth=0.8)
             ax.plot(rolling_mean(goals, roll_window), color='tab:green')
-        ax.set_ylabel('Goals Reached')
-        ax.set_xlabel('Episode')
-        ax.set_title('Goal-Find Rate')
+        ax.set_ylabel('Goals / Agent')
+        ax.set_xlabel('Round')
+        ax.set_title('Goal-Find Rate (per agent)')
 
         # ── (1,0) Policy Gradient Loss ──────────────────────────────────────────
         ax = axes[1, 0]
@@ -619,8 +690,9 @@ class Agent:
             ax.plot(pg, alpha=0.3, color='tab:red', linewidth=0.8)
             ax.plot(rolling_mean(pg, roll_window), color='tab:red')
         ax.set_ylabel('PG Loss')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Policy Gradient Loss')
+        ax.autoscale(axis='y')
 
         # ── (1,1) Value Function Loss ───────────────────────────────────────────
         ax = axes[1, 1]
@@ -629,7 +701,7 @@ class Agent:
             ax.plot(vf, alpha=0.3, color='tab:blue', linewidth=0.8)
             ax.plot(rolling_mean(vf, roll_window), color='tab:blue')
         ax.set_ylabel('Value Loss')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Value Function Loss')
 
         # ── (1,2) Gradient Norm ─────────────────────────────────────────────────
@@ -639,7 +711,7 @@ class Agent:
             ax.plot(gnorm, alpha=0.3, color='tab:brown', linewidth=0.8)
             ax.plot(rolling_mean(gnorm, roll_window), color='tab:brown')
         ax.set_ylabel('Gradient L2 Norm')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Gradient Norm')
 
         # ── (2,0) Entropy ───────────────────────────────────────────────────────
@@ -649,7 +721,7 @@ class Agent:
             ax.plot(ent, alpha=0.3, color='tab:cyan', linewidth=0.8)
             ax.plot(rolling_mean(ent, roll_window), color='tab:cyan')
         ax.set_ylabel('Policy Entropy')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Entropy (exploration)')
 
         # ── (2,1) Clip Fraction + Approx KL ────────────────────────────────────
@@ -657,14 +729,19 @@ class Agent:
         if self.clip_frac_history:
             cf  = np.array(self.clip_frac_history, dtype=float)
             kl  = np.array(self.approx_kl_history, dtype=float)
+            ax.plot(cf, alpha=0.3, color='tab:orange', linewidth=0.8)
             ax.plot(rolling_mean(cf,  roll_window), color='tab:orange', label='Clip frac')
             ax2 = ax.twinx()
-            ax2.plot(rolling_mean(kl, roll_window), color='tab:pink',   label='Approx KL', linestyle='--')
+            # Only plot raw KL clipped to 3× the rolling-mean range to suppress early spikes.
+            kl_smooth = rolling_mean(kl, roll_window)
+            kl_cap = max(kl_smooth.max() * 3.0, 0.01)
+            ax2.plot(np.clip(kl, 0, kl_cap), alpha=0.3, color='tab:pink', linewidth=0.8)
+            ax2.plot(kl_smooth, color='tab:pink',   label='Approx KL', linestyle='--')
             ax.set_ylabel('Clip Fraction', color='tab:orange')
             ax2.set_ylabel('Approx KL',    color='tab:pink')
             ax.tick_params(axis='y', labelcolor='tab:orange')
             ax2.tick_params(axis='y', labelcolor='tab:pink')
-        ax.set_xlabel('Episode')
+        ax.set_xlabel('Round')
         ax.set_title('Clip Fraction + Approx KL')
 
         # ── (2,2) Action Distribution ───────────────────────────────────────────
@@ -683,9 +760,9 @@ class Agent:
                         f'{val:.1f}%', ha='center', va='bottom', fontsize=7)
             ax.set_ylabel('Usage (%)')
             ax.set_ylim(0, 100)
-        ax.set_title(f'Action Distribution (last {action_window} eps)')
+        ax.set_title(f'Action Distribution (last {action_window} rounds)')
 
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 0.97, 1])
         fig.savefig(self.GRAPH_FILE, dpi=100)
         plt.close(fig)
 

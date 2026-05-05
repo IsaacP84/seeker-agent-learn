@@ -298,7 +298,7 @@ namespace
 
 } // namespace
 
-Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
+Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker_" + std::to_string(s_seeker_body_ids.size())))
 {
     // using Type = Magic::Handle::Type;
     auto &app = Magic::Application::get();
@@ -316,7 +316,7 @@ Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
     uh.on_move = chase_player;
     uh.on_jump = [](EntityManager &em, Entity e, double dt)
     {
-        LOG("JUMP");
+        // LOG("JUMP");
         auto [lock, reg] = ((const EntityManager &)em).get_registry();
         const auto &data = reg.get<Seeker::Data>(e);
 
@@ -328,12 +328,12 @@ Seeker::Seeker(EntityManager &em) : m_e(em.create("Seeker"))
 
     uh.on_land = [](EntityManager &, Entity)
     {
-        LOG("LAND");
+        // LOG("LAND");
     };
 
     uh.on_shoot = [this](EntityManager &em, Entity e, double dt)
     {
-        LOG("shoot");
+        // LOG("shoot");
         //
         // UNSAFE
         //

@@ -102,8 +102,10 @@ public:
     using SightingBodyID = std::variant<JPH::BodyID, int>;
 
     void bind(Magic::EntityManager &em, Magic::Entity seeker, std::vector<Magic::Entity> goals);
+    void set_agent_id(int id) { m_agent_id = id; }
     void set_ignored_bodies(std::vector<JPH::BodyID> ids) { m_ignored_bodies = std::move(ids); }
     void set_pending_none() { m_pending_action = -1; } // maps to Seeker::NONE via default case
+    void seed_rng(uint32_t seed) { m_rng.seed(seed); }
 
     std::vector<float>                         reset();
     std::vector<float>                         get_observation(float dt);
@@ -120,6 +122,7 @@ public:
 
 private:
     Magic::EntityManager *m_em     = nullptr;
+    int                   m_agent_id = -1;
     Magic::Entity         m_seeker = entt::null;
     std::vector<Goal>     m_goals;
 
@@ -137,6 +140,7 @@ private:
     float     m_current_goal_time_limit = Episode::max_goal_search_seconds;
     bool      m_done             = false;
     int       m_step_count      = 0;
+    int       m_goals_this_episode = 0;
     int       m_pending_action  = 0;
     int       m_prev_action     = -1; // -1 = no previous action (start of episode)
 
