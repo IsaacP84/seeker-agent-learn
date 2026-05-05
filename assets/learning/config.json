@@ -1,6 +1,6 @@
 {
     "scene": "learn",
-    "is_training": false,
+    "is_training": true,
     "load_model": null,
     "num_agents": 4,
     "checkpointing": {

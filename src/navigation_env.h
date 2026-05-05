@@ -108,7 +108,8 @@ public:
     std::vector<float>                         reset();
     std::vector<float>                         get_observation(float dt);
     float                                      compute_reward();
-    bool                                       is_done() const;
+    bool                                       is_done() const;     // true on any termination (terminal or truncated)
+    bool                                       is_terminal() const; // true only for true terminal (fell off map)
     void                                       apply_action(int action);
     Seeker::Action                             pending_action() const;
     std::unordered_map<std::string, float>     get_env_data() const;

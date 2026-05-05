@@ -241,14 +241,18 @@ void LearnScene::update(double dt)
                 std::vector<float> obs;
                 if (slot.has_last_obs)
                 {
-                    float reward = slot.env->compute_reward();
-                    bool  done   = slot.env->is_done();
+                    float reward    = slot.env->compute_reward();
+                    bool  episode_over = slot.env->is_done();
+                    // Pass true terminal (fell off map) vs truncation (timeout/step-limit)
+                    // separately so the rollout buffer bootstraps truncations with V(s_last)
+                    // rather than 0, avoiding systematic value underestimation.
+                    bool  terminal  = slot.env->is_terminal();
                     obs = slot.env->get_observation(static_cast<float>(dt));
 
                     if (m_is_training && m_has_feedback && m_feedback_func)
-                        m_feedback_func(slot.last_obs, slot.last_action, reward, done, obs, i);
+                        m_feedback_func(slot.last_obs, slot.last_action, reward, terminal, obs, i);
 
-                    if (done)
+                    if (episode_over)
                     {
                         // Mark done but do NOT reset yet — wait for all agents
                         // to finish so the round resets synchronously.

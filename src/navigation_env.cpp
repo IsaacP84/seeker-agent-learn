@@ -512,6 +512,15 @@ bool NavigationEnv::is_done() const
         || m_time_since_goal >= m_current_goal_time_limit;
 }
 
+bool NavigationEnv::is_terminal() const
+{
+    // Only true when the agent fell off the map — a true terminal state
+    // with no continuation value. Step/time/goal-timeout truncations are
+    // NOT terminal: the episode ends but the world continues, so V(s_last)
+    // should be used as the GAE bootstrap, not 0.
+    return m_done;
+}
+
 void NavigationEnv::apply_action(int action)
 {
     m_prev_action    = m_pending_action;

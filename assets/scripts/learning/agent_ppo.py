@@ -439,8 +439,10 @@ class Agent:
         """Run PPO update epochs over the current rollout buffer."""
         adv, ret = self.buffer.prepare(last_value, self.discount_factor_g, self.gae_lambda)
 
-        # Normalize advantages
+        # Normalize advantages and write back so get_batches sees the normalized values.
+        # (prepare() stores raw advantages on buffer._advantages; get_batches reads from there.)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        self.buffer._advantages = adv
 
         for _ in range(self.n_epochs):
             for batch in self.buffer.get_batches(self.mini_batch_size):
