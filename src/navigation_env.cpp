@@ -13,6 +13,13 @@
 #include <algorithm>
 #include <limits>
 
+
+#ifdef TRACY_ENABLE
+#    include <tracy/Tracy.hpp>
+#else
+#    define ZoneScoped
+#endif
+
 using namespace Magic;
 
 // Ignore the seeker body when raycasting (same pattern as seeker.cpp).
@@ -57,6 +64,7 @@ void NavigationEnv::bind(EntityManager &em, Entity seeker, std::vector<Entity> g
 
 std::vector<float> NavigationEnv::reset()
 {
+    ZoneScoped;
     Debug::Log("NavigationEnv reset");
     ++m_episode_count;
     m_step_count = 0;
@@ -102,6 +110,7 @@ std::vector<float> NavigationEnv::reset()
 
 std::vector<float> NavigationEnv::get_observation(float dt)
 {
+    ZoneScoped;
     std::vector<float> obs(NavigationEnv::Sizes::num_states, 0.f);
 
     if (!m_em || m_seeker == entt::null)
@@ -407,6 +416,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
 float NavigationEnv::compute_reward()
 {
+    ZoneScoped;
     if (!m_em || m_seeker == entt::null || m_goals.empty())
         return 0.f;
 
@@ -486,11 +496,18 @@ float NavigationEnv::compute_reward()
 
         m_time_since_goal = 0.f;
 
-        // Invalidate sightings after goal relocation.
+        // Invalidate only sightings for the collected goal.
         for (auto &ray_buf : m_sightings)
+        {
             for (auto &sg : ray_buf)
-                sg = Sighting{};
-        m_sight_head.fill(0);
+            {
+                if (sg.valid && std::holds_alternative<int>(sg.body_id) && std::get<int>(sg.body_id) == nearest_idx)
+                {
+                    sg = Sighting{};
+                    break; // only one sighting per ray can match the collected goal, so stop searching this ray after invalidating
+                }
+            }
+        }
 
         return Reward::goal_reward + speed_bonus;
     }

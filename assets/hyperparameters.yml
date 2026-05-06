@@ -2,9 +2,9 @@ seeker:
   # --- PPO Rollout ---
   # 4096 steps captures ~2 full episodes (avg ~1800 steps) per update,
   # giving PPO more complete trajectories for advantage estimation.
-  n_steps: 4096
+  n_steps: 8192
   n_epochs: 10
-  mini_batch_size: 256
+  mini_batch_size: 1024
 
   # --- PPO Clipping ---
   clip_epsilon: 0.1

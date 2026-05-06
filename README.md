@@ -2,6 +2,9 @@
 
 A reinforcement learning agent that learns navigation using the [Magic-Engine](https://github.com/IsaacP84/Magic-Engine) runtime.
 
+NOTE: all python files relevant to training are located in assets/scripts.
+LearnScene.cpp is responsible for driving the learning (step function). It may take a while to load on fresh install due to no pycache for torch.
+
 ## Structure
 
 | Path | Description |

@@ -26,6 +26,11 @@ set_target_properties(app PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 
 target_link_libraries(app PRIVATE Magic::engine)
 
+if(ENABLE_TRACY)
+    target_link_libraries(app PRIVATE Tracy::TracyClient)
+    target_compile_definitions(app PRIVATE TRACY_ENABLE)
+endif()
+
 if(MINGW)
     target_link_options(app PRIVATE -static-libgcc -static-libstdc++)
     find_file(_winpthread_static "libwinpthread.a"

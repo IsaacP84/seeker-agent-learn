@@ -35,7 +35,17 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/unique_ptr.h>
 
+#ifdef TRACY_ENABLE
+#    include <tracy/Tracy.hpp>
+#else
+#    define ZoneScoped
+#    define FrameMark
+#    define ZoneScopedN(...)
+#endif
+
 #include <random>
+
+
 
 namespace nb = nanobind;
 using namespace Magic;
@@ -238,6 +248,8 @@ void LearnScene::onDeactivate()
 // doesn't get called when the engine is paused
 void LearnScene::update(double dt)
 {
+    FrameMark;
+    ZoneScoped;
     Scene::update(dt);
     Camera &cam = Application::get().CurrentCamera();
     free_cam_motion_update_handler(dt, cam);
@@ -259,6 +271,7 @@ void LearnScene::update(double dt)
         {
             for (int i = 0; i < (int)m_agents.size(); ++i)
             {
+                ZoneScopedN("Agent step");
                 AgentSlot &slot = m_agents[i];
 
                 // This agent has finished its episode and is waiting for the
@@ -340,6 +353,7 @@ void LearnScene::update(double dt)
 
             if (all_done)
             {
+                ZoneScopedN("Round complete");
                 // Notify Python first so it can flush the PPO buffer before
                 // env state is overwritten by reset().
                 if (m_has_round_complete && m_round_complete_func)

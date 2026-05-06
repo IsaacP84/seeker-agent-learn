@@ -1,3 +1,4 @@
 [submodule "extern/tracy"]
 	path = extern/tracy
 	url = https://github.com/wolfpld/tracy
+    branch = v0.13.1
