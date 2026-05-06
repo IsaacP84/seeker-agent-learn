@@ -142,6 +142,27 @@ void PauseHelper::handle_input(const SDL_Event &e)
         default:
             break;
         }
+
+        {
+            const bool *state = Magic::Engine::GetKeyboardState();
+            
+            if (state[SDL_SCANCODE_LCTRL] && state[SDL_SCANCODE_1])
+            {
+                // resize to 360p
+                pause();
+                Magic::GetApplication().getWindow().resize(640, 360);
+                unpause();
+            }
+
+            if (state[SDL_SCANCODE_LCTRL] && state[SDL_SCANCODE_2])
+            {
+                // resize to 720p
+                pause();
+                Magic::GetApplication().getWindow().resize(1280, 720);
+                unpause();
+            }
+        }
+        
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
         if (Magic::GetEngine().is_paused())
