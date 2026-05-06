@@ -163,7 +163,7 @@ class Agent:
         if self.lr_decay_episodes > 0:
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
-                T_max=max(1, self.lr_decay_episodes * num_agents),
+                T_max=max(1, self.lr_decay_episodes),
                 eta_min=self.lr_min,
             )
         else:
@@ -520,11 +520,11 @@ class Agent:
         self._gradient_norms_post_clip = []
 
         # -- 5. Scheduler + checkpoint/graph --
-        # Step once per agent-episode to preserve the same LR decay rate as
-        # the original per-episode stepping (T_max was already scaled by num_agents).
+        # Step once per round. Each round is the synchronization point for
+        # all agents, so the scheduler should advance once per round, not once
+        # per agent.
         if self.scheduler is not None:
-            for _ in range(self.num_agents):
-                self.scheduler.step()
+            self.scheduler.step()
 
         self.save_graph()
         if round_num % 1 == 0:

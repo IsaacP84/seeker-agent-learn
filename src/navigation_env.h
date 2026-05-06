@@ -63,7 +63,7 @@ public:
         static constexpr float max_seconds             = 300.f;
         static constexpr float max_goal_search_seconds = 60.f;
         static constexpr float min_goal_search_seconds = 10.f;
-        static constexpr float search_time_fall_rate   = 0.001f;
+        static constexpr float search_time_fall_rate   = 0.1f;
     };
 
     struct Curriculum
@@ -71,7 +71,7 @@ public:
         // Episodes to keep boundary walls active (curriculum learning).
         // LearnScene creates the walls; after this many resets it removes them.
         // Set to 0 to disable the curriculum (no walls ever created).
-        static constexpr int boundary_wall_episodes = 1000;
+        static constexpr int boundary_wall_episodes = 200;
     };
 
     struct Reward

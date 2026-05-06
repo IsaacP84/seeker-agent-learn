@@ -131,9 +131,9 @@ On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detect
 |---|---|
 | Max steps | 100,000 |
 | Max episode time | 300 s |
-| Goal search timeout | 60 s initially, decreasing by 0.001 s per episode down to a floor of 10 s (resets on every goal reach) |
+| Goal search timeout | 60 s initially, decreasing by 0.1 s per episode down to a floor of 10 s (resets on every goal reach) |
 
-The curriculum shrinks the time limit each episode (`SEARCH_TIME_FALL_RATE = 0.001`), forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
+The curriculum shrinks the time limit each episode (`SEARCH_TIME_FALL_RATE = 0.1`), forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
 
 With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent always has a nearby target visible. A well-trained agent scoring 15–30 goals/episode earns 150–300+ reward.
 
