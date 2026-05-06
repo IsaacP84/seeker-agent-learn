@@ -8,6 +8,7 @@
 
 #include <Magic!/debug/debug.hpp>
 #include <Magic!/core/camera.hpp>
+#include <Magic!/app/window.hpp>
 
 #include <Magic!/python/interpreter.hpp>
 namespace nb = nanobind;
@@ -150,7 +151,7 @@ void PauseHelper::handle_input(const SDL_Event &e)
             {
                 // resize to 360p
                 pause();
-                Magic::GetApplication().getWindow().resize(640, 360);
+                Magic::GetApplication().getWindow().SetWindowSize(640, 360);
                 unpause();
             }
 
@@ -158,7 +159,7 @@ void PauseHelper::handle_input(const SDL_Event &e)
             {
                 // resize to 720p
                 pause();
-                Magic::GetApplication().getWindow().resize(1280, 720);
+                Magic::GetApplication().getWindow().SetWindowSize(1280, 720);
                 unpause();
             }
         }
