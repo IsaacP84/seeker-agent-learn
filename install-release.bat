@@ -2,7 +2,7 @@
 setlocal
 
 set BUILD_DIR=build-release
-set INSTALL_DIR=%~dp0install-release-windows
+set INSTALL_DIR=%~dp0seeker-agent-learn-install
 
 if not exist "%BUILD_DIR%\CMakeCache.txt" (
     cmake -S . -B "%BUILD_DIR%" -G "Ninja" ^

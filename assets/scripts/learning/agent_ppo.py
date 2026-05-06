@@ -198,6 +198,7 @@ class Agent:
         self._episode_clip_fracs   = []
         self._episode_approx_kls   = []
         self._gradient_norms       = []
+        self._gradient_norms_post_clip = []
 
         # Persistent diagnostic histories
         self.action_dist_history    = []
@@ -208,6 +209,7 @@ class Agent:
         self.approx_kl_history      = []
         self.episode_length_history = []
         self.gradient_norm_history  = []
+        self.gradient_norm_post_clip_history = []
         self.goal_reach_history     = []
 
         # Locate checkpoint
@@ -278,14 +280,23 @@ class Agent:
                             self.optimizer.load_state_dict(checkpoint['optimizer'])
                         if 'scheduler' in checkpoint and self.scheduler is not None:
                             self.scheduler.load_state_dict(checkpoint['scheduler'])
+
+                        history_round = checkpoint.get('history_round', 0)
+                        if history_round == 0 and 'rewards_per_episode' in checkpoint:
+                            history_round = len(checkpoint['rewards_per_episode'])
+
+                        def _trim_to_checkpoint(hist):
+                            return hist[:history_round] if isinstance(hist, list) and history_round > 0 else hist
+
                         for key in ('rewards_per_episode', 'goal_time_limit_history',
                                     'action_dist_history', 'pg_loss_history',
                                     'value_loss_history', 'entropy_history',
                                     'clip_frac_history', 'approx_kl_history',
                                     'episode_length_history', 'gradient_norm_history',
-                                    'goal_reach_history'):
+                                    'gradient_norm_post_clip_history', 'goal_reach_history'):
                             if key in checkpoint:
-                                setattr(self, key, checkpoint[key])
+                                setattr(self, key, _trim_to_checkpoint(checkpoint[key]))
+
                         if self.save_diagnostics_separately and os.path.exists(self.DIAGNOSTICS_FILE):
                             try:
                                 with open(self.DIAGNOSTICS_FILE, 'r') as df:
@@ -295,9 +306,9 @@ class Agent:
                                             'value_loss_history', 'entropy_history',
                                             'clip_frac_history', 'approx_kl_history',
                                             'episode_length_history', 'gradient_norm_history',
-                                            'goal_reach_history'):
+                                            'gradient_norm_post_clip_history', 'goal_reach_history'):
                                     if key in diag:
-                                        setattr(self, key, diag[key])
+                                        setattr(self, key, _trim_to_checkpoint(diag[key]))
                             except Exception:
                                 pass
                         if 'env_data' in checkpoint:
@@ -465,7 +476,9 @@ class Agent:
         self.approx_kl_history.append(
             float(np.mean(self._episode_approx_kls))   if self._episode_approx_kls   else _last_or(self.approx_kl_history))
         mean_grad = float(np.mean(self._gradient_norms)) if self._gradient_norms else _last_or(self.gradient_norm_history)
+        mean_grad_post = float(np.mean(self._gradient_norms_post_clip)) if self._gradient_norms_post_clip else _last_or(self.gradient_norm_post_clip_history)
         self.gradient_norm_history.append(mean_grad)
+        self.gradient_norm_post_clip_history.append(mean_grad_post)
         # True when we have fresh loss values from a completed rollout this round.
         has_fresh_losses = bool(self._episode_pg_losses)
 
@@ -504,6 +517,7 @@ class Agent:
         self._episode_clip_fracs   = []
         self._episode_approx_kls   = []
         self._gradient_norms       = []
+        self._gradient_norms_post_clip = []
 
         # -- 5. Scheduler + checkpoint/graph --
         # Step once per agent-episode to preserve the same LR decay rate as
@@ -601,9 +615,13 @@ class Agent:
 
                 self.optimizer.zero_grad()
                 loss.backward()
+                params = list(self.actor.parameters()) + list(self.critic.parameters())
                 grad_norm_pre_clip = float(torch.nn.utils.clip_grad_norm_(
-                    list(self.actor.parameters()) + list(self.critic.parameters()),
+                    params,
                     self.max_grad_norm
+                ))
+                grad_norm_post_clip = float(torch.sqrt(
+                    sum(p.grad.detach().norm(2).pow(2) for p in params if p.grad is not None)
                 ))
                 self.optimizer.step()
 
@@ -618,6 +636,7 @@ class Agent:
                 self._episode_clip_fracs.append(clip_frac)
                 self._episode_approx_kls.append(approx_kl)
                 self._gradient_norms.append(total_norm)
+                self._gradient_norms_post_clip.append(grad_norm_post_clip)
 
         # buffer.clear() and _steps_since_ppo reset are handled by
         # _run_ppo_update_async before the thread starts.
@@ -630,7 +649,7 @@ class Agent:
             'rewards_per_episode', 'goal_time_limit_history', 'action_dist_history',
             'pg_loss_history', 'value_loss_history', 'entropy_history',
             'clip_frac_history', 'approx_kl_history', 'episode_length_history',
-            'gradient_norm_history', 'goal_reach_history'
+            'gradient_norm_history', 'gradient_norm_post_clip_history', 'goal_reach_history'
         ]
         for attr in history_attrs:
             hist = getattr(self, attr, None)
@@ -658,6 +677,7 @@ class Agent:
             'approx_kl_history':      self._downsample_list(self.approx_kl_history),
             'episode_length_history': self._downsample_list(self.episode_length_history),
             'gradient_norm_history':  self._downsample_list(self.gradient_norm_history),
+            'gradient_norm_post_clip_history': self._downsample_list(self.gradient_norm_post_clip_history),
             'goal_reach_history':     self._downsample_list(self.goal_reach_history),
         }
         filename = self.diagnostics_filename_template.format(name=self.hyperparameter_set)
@@ -709,6 +729,7 @@ class Agent:
             'critic':                 self.critic.state_dict(),
             'optimizer':              self.optimizer.state_dict(),
             'reward_scale':           self.reward_scale,
+            'history_round':          episode,
             **({'scheduler': self.scheduler.state_dict()} if self.scheduler is not None else {}),
         }
 
@@ -724,6 +745,7 @@ class Agent:
                 'approx_kl_history':      self.approx_kl_history,
                 'episode_length_history': self.episode_length_history,
                 'gradient_norm_history':  self.gradient_norm_history,
+                'gradient_norm_post_clip_history': self.gradient_norm_post_clip_history,
                 'goal_reach_history':     self.goal_reach_history,
             })
 
@@ -792,6 +814,14 @@ class Agent:
             head = np.array([arr[:i+1].mean() for i in range(min(w - 1, len(arr)))])
             return np.concatenate([head, result])
 
+        def _plot_history(ax, data, color, label=None, linestyle='-'):
+            if not data:
+                return
+            arr = np.array(data, dtype=float)
+            x = rounds if len(arr) == n else np.arange(1, len(arr) + 1)
+            ax.plot(x, arr, alpha=0.3, color=color, linewidth=0.8, label=label)
+            ax.plot(x, rolling_mean(arr, roll_window), color=color, linestyle=linestyle)
+
         fig, axes = plt.subplots(3, 3, figsize=(21, 13))
         fig.suptitle(
             f'PPO Diagnostics — {self.hyperparameter_set}  '
@@ -800,9 +830,7 @@ class Agent:
 
         # ── (0,0) Reward + Curriculum ──────────────────────────────────────────
         ax = axes[0, 0]
-        rewards = np.array(self.rewards_per_episode, dtype=float)
-        ax.plot(rounds, rewards, alpha=0.3, color='tab:blue', linewidth=0.8)
-        ax.plot(rounds, rolling_mean(rewards, roll_window), color='tab:blue', label=f'{roll_window}-round mean')
+        _plot_history(ax, self.rewards_per_episode, 'tab:blue', label=f'{roll_window}-round mean')
         ax.set_ylabel('Mean Reward', color='tab:blue')
         ax.tick_params(axis='y', labelcolor='tab:blue')
         ax.set_xlabel('Round')
@@ -821,30 +849,21 @@ class Agent:
 
         # ── (0,1) Episode Length ────────────────────────────────────────────────
         ax = axes[0, 1]
-        if self.episode_length_history:
-            lengths = np.array(self.episode_length_history, dtype=float)
-            ax.plot(rounds, lengths, alpha=0.3, color='tab:purple', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(lengths, roll_window), color='tab:purple')
+        _plot_history(ax, self.episode_length_history, 'tab:purple')
         ax.set_ylabel('Steps / Episode')
         ax.set_xlabel('Round')
         ax.set_title('Episode Length')
 
         # ── (0,2) Goals Reached ─────────────────────────────────────────────────
         ax = axes[0, 2]
-        if self.goal_reach_history:
-            goals = np.array(self.goal_reach_history, dtype=float)
-            ax.plot(rounds, goals, alpha=0.3, color='tab:green', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(goals, roll_window), color='tab:green')
+        _plot_history(ax, self.goal_reach_history, 'tab:green')
         ax.set_ylabel('Goals / Agent')
         ax.set_xlabel('Round')
         ax.set_title('Goal-Find Rate (per agent)')
 
         # ── (1,0) Policy Gradient Loss ──────────────────────────────────────────
         ax = axes[1, 0]
-        if self.pg_loss_history:
-            pg = np.array(self.pg_loss_history, dtype=float)
-            ax.plot(rounds, pg, alpha=0.3, color='tab:red', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(pg, roll_window), color='tab:red')
+        _plot_history(ax, self.pg_loss_history, 'tab:red')
         ax.set_ylabel('PG Loss')
         ax.set_xlabel('Round')
         ax.set_title('Policy Gradient Loss')
@@ -852,10 +871,7 @@ class Agent:
 
         # ── (1,1) Value Function Loss ───────────────────────────────────────────
         ax = axes[1, 1]
-        if self.value_loss_history:
-            vf = np.array(self.value_loss_history, dtype=float)
-            ax.plot(rounds, vf, alpha=0.3, color='tab:blue', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(vf, roll_window), color='tab:blue')
+        _plot_history(ax, self.value_loss_history, 'tab:blue')
         ax.set_ylabel('Value Loss')
         ax.set_xlabel('Round')
         ax.set_title('Value Function Loss')
@@ -863,19 +879,18 @@ class Agent:
         # ── (1,2) Gradient Norm ─────────────────────────────────────────────────
         ax = axes[1, 2]
         if self.gradient_norm_history:
-            gnorm = np.array(self.gradient_norm_history, dtype=float)
-            ax.plot(rounds, gnorm, alpha=0.3, color='tab:brown', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(gnorm, roll_window), color='tab:brown')
+            _plot_history(ax, self.gradient_norm_history, 'tab:brown', label='Pre-clip')
+        if self.gradient_norm_post_clip_history:
+            _plot_history(ax, self.gradient_norm_post_clip_history, 'tab:olive', label='Post-clip', linestyle='--')
         ax.set_ylabel('Gradient L2 Norm')
         ax.set_xlabel('Round')
-        ax.set_title('Gradient Norm')
+        ax.set_title('Gradient Norm (pre / post clip)')
+        if self.gradient_norm_history or self.gradient_norm_post_clip_history:
+            ax.legend(loc='upper left', fontsize='small')
 
         # ── (2,0) Entropy ───────────────────────────────────────────────────────
         ax = axes[2, 0]
-        if self.entropy_history:
-            ent = np.array(self.entropy_history, dtype=float)
-            ax.plot(rounds, ent, alpha=0.3, color='tab:cyan', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(ent, roll_window), color='tab:cyan')
+        _plot_history(ax, self.entropy_history, 'tab:cyan')
         ax.set_ylabel('Policy Entropy')
         ax.set_xlabel('Round')
         ax.set_title('Entropy (exploration)')
@@ -885,14 +900,16 @@ class Agent:
         if self.clip_frac_history:
             cf  = np.array(self.clip_frac_history, dtype=float)
             kl  = np.array(self.approx_kl_history, dtype=float)
-            ax.plot(rounds, cf, alpha=0.3, color='tab:orange', linewidth=0.8)
-            ax.plot(rounds, rolling_mean(cf,  roll_window), color='tab:orange', label='Clip frac')
+            x_cf = rounds if len(cf) == n else np.arange(1, len(cf) + 1)
+            x_kl = rounds if len(kl) == n else np.arange(1, len(kl) + 1)
+            ax.plot(x_cf, cf, alpha=0.3, color='tab:orange', linewidth=0.8)
+            ax.plot(x_cf, rolling_mean(cf,  roll_window), color='tab:orange', label='Clip frac')
             ax2 = ax.twinx()
             # Only plot raw KL clipped to 3× the rolling-mean range to suppress early spikes.
             kl_smooth = rolling_mean(kl, roll_window)
             kl_cap = max(kl_smooth.max() * 3.0, 0.01)
-            ax2.plot(rounds, np.clip(kl, 0, kl_cap), alpha=0.3, color='tab:pink', linewidth=0.8)
-            ax2.plot(rounds, kl_smooth, color='tab:pink',   label='Approx KL', linestyle='--')
+            ax2.plot(x_kl, np.clip(kl, 0, kl_cap), alpha=0.3, color='tab:pink', linewidth=0.8)
+            ax2.plot(x_kl, kl_smooth, color='tab:pink',   label='Approx KL', linestyle='--')
             ax.set_ylabel('Clip Fraction', color='tab:orange')
             ax2.set_ylabel('Approx KL',    color='tab:pink')
             ax.tick_params(axis='y', labelcolor='tab:orange')

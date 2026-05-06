@@ -8,9 +8,9 @@
         "max_history_entries": 1000,
         "downsample_rate": 1,
         "compress": null,
-        "full_checkpoint_interval": 50,
+        "full_checkpoint_interval": 10,
         "save_replay_buffer_on_full": false,
-        "save_diagnostics_separately": false,
+        "save_diagnostics_separately": true,
         "archival_float16": false,
         "diagnostics_filename_template": "{name}_diagnostics.json"
     }
