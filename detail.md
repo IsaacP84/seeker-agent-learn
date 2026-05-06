@@ -14,23 +14,23 @@ DQN has been replaced with PPO. The C++↔Python interface (`step(obs) → int`,
 
 ## Hyperparameters (seeker set)
 
-| Parameter | Value | Rationale |
+| Parameter | Description | Rationale |
 |---|---|---|
-| `n_steps` | 4,096 | Rollout length before each PPO update; captures ~2 full episodes per update |
-| `n_epochs` | 10 | Number of passes over each rollout batch |
-| `mini_batch_size` | 256 | Mini-batch size within each epoch |
-| `clip_epsilon` | 0.1 | PPO clipping range |
-| `gae_lambda` | 0.95 | GAE smoothing — balances bias vs. variance in advantage estimates |
-| `discount_factor_g` | 0.999 | `0.999^900 ≈ 0.41` — agent retains meaningful credit across the full 30 s search window |
-| `reward_scale` | 0.1 | Divides every reward before it enters the buffer, keeping returns in a unit-ish range |
-| `entropy_coeff` | 0.01 | Entropy bonus weight; keeps exploration alive without dominating the loss |
-| `value_loss_coeff` | 1.0 | Critic loss weight relative to actor loss |
-| `learning_rate_a` | 0.0001 | Initial Adam learning rate over Actor + Critic parameters |
-| `lr_min` | 0.00003 | Cosine annealing minimum LR |
-| `lr_decay_episodes` | 5,000 | Episodes over which LR cosine-anneals from `learning_rate_a` to `lr_min` |
-| `max_grad_norm` | 1.0 | Gradient clipping threshold |
-| `stop_on_reward` | 999,999 | Multi-goal episodes can score 200+ when trained; don't stop prematurely |
-| `hidden_dims` | [256, 256, 128] | Both Actor and Critic use separate MLPs with this architecture |
+| `n_steps` | Rollout length before each PPO update | Captures multiple episodes per update |
+| `n_epochs` | Number of optimization passes over each rollout batch | More epochs increase stability at some cost |
+| `mini_batch_size` | Mini-batch size used within each epoch | Balances gradient variance and throughput |
+| `clip_epsilon` | PPO clipping range | Limits policy update magnitude |
+| `gae_lambda` | GAE smoothing factor | Balances bias vs. variance in advantage estimates |
+| `discount_factor_g` | Discount factor for future rewards | Retains credit over long search horizons |
+| `reward_scale` | Scalar applied to rewards | Keeps returns numerically stable |
+| `entropy_coeff` | Entropy bonus weight | Keeps exploration alive without dominating loss |
+| `value_loss_coeff` | Critic loss weight relative to actor loss | Balances value fitting with policy updates |
+| `learning_rate_a` | Initial Adam learning rate | Starting step size for both networks |
+| `lr_min` | Minimum learning rate | Floor for the annealing schedule |
+| `lr_decay_episodes` | Length of the LR annealing schedule | Controls how quickly LR decays over training |
+| `max_grad_norm` | Gradient clipping threshold | Prevents runaway updates |
+| `stop_on_reward` | Episode reward threshold for stopping | Avoids premature termination of high-return episodes |
+| `hidden_dims` | Hidden layer widths for both networks | Defines the MLP representation capacity |
 
 ---
 
@@ -39,10 +39,10 @@ DQN has been replaced with PPO. The C++↔Python interface (`step(obs) → int`,
 Both Actor and Critic are **separate** MLPs (no shared trunk):
 
 ```
-Input (209) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(128) → ReLU → head
+Input (234) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(128) → ReLU → head
 ```
 
-- **Actor head:** Linear(128 → 7) → Categorical distribution over 7 actions
+- **Actor head:** Linear(128 → 8) → Categorical distribution over 8 actions
 - **Critic head:** Linear(128 → 1) → scalar value estimate V(s)
 - Single shared Adam optimizer over both networks' parameters
 
@@ -53,13 +53,13 @@ Input (209) → Linear(256) → ReLU → Linear(256) → ReLU → Linear(128) �
 Each C++ physics step calls `step(obs)` then `feedback(...)` once. Internally:
 
 1. `step()` samples from the Actor (stochastic in training, greedy in inference) and caches `log_prob` and `V(s)` for the next `observe()` call.
-2. `observe()` appends the transition to the `RolloutBuffer`. When the buffer has accumulated **4,096 steps**:
+2. `observe()` appends the transition to the `RolloutBuffer`. When the buffer has accumulated a full PPO rollout:
    - Bootstrap the last value with `V(next_state)` from the Critic
-   - Compute GAE-Lambda advantages and discounted returns over the full rollout
+   - Compute GAE-Lambda advantages and discounted returns over the rollout
    - Normalize advantages (zero mean, unit std)
-   - Run **10 epochs** of mini-batch PPO updates (256-step batches, randomly shuffled each epoch)
+   - Run multiple epochs of mini-batch PPO updates with shuffled batches
    - Clipped surrogate loss + value loss + entropy bonus
-   - Clip gradient norm to 0.5
+   - Clip gradient norm to the configured max threshold
    - Clear the buffer
 3. On episode end (done=True), any partial buffer is also flushed with `last_value=0`.
 
@@ -96,9 +96,9 @@ On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detect
 | 199 | Goal sighting staleness normalised [0, 1] over 5 s — 0 = just seen, 1 = not seen for 5+ s |
 | 200 | `in_air` flag (1.0 = airborne, 0.0 = grounded) |
 | 201 | `is_jumping` flag (1.0 = jump impulse active) |
-| 202–208 | Previous action one-hot (7 actions; all zero at episode start) |
+| 202–233 | Previous action history one-hot (4 steps × 8 actions; all zero at episode start) |
 
-**Actions (7):**
+**Actions (8):**
 
 | Index | Action |
 |---|---|
@@ -109,6 +109,7 @@ On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detect
 | 4 | TURN_LEFT |
 | 5 | TURN_RIGHT |
 | 6 | JUMP |
+| 7 | IDLE |
 
 ---
 
@@ -131,9 +132,9 @@ On load, shape mismatches and DQN checkpoints (missing `'actor'` key) are detect
 |---|---|
 | Max steps | 100,000 |
 | Max episode time | 300 s |
-| Goal search timeout | 60 s initially, decreasing by 0.1 s per episode down to a floor of 10 s (resets on every goal reach) |
+| Goal search timeout | Starts at the configured maximum and decays toward a lower floor each episode; resets on every goal reach |
 
-The curriculum shrinks the time limit each episode (`SEARCH_TIME_FALL_RATE = 0.1`), forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
+The curriculum shrinks the time limit each episode by the configured fall rate, forcing the agent to find goals faster as it improves. The timer resets on every goal reach, so a well-trained agent chains goals as long as each one is found within the current limit.
 
 With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent always has a nearby target visible. A well-trained agent scoring 15–30 goals/episode earns 150–300+ reward.
 
@@ -142,7 +143,7 @@ With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent
 ## Estimated Training Timeline
 
 > The logic thread runs **free (unlocked)** during training — steps accumulate as fast as the CPU allows. Estimates are in steps only, not wall-clock time.
-> PPO updates every 4,096 steps, so "updates" = total steps ÷ 4,096.
+> PPO updates every configured rollout length, so "updates" = total steps ÷ rollout length.
 
 | Milestone | Total Steps | Approx. Updates | Approx. Episodes |
 |---|---|---|---|
@@ -152,19 +153,19 @@ With **3 simultaneous goals** (`NUM_GOALS = 3`) spread across the map, the agent
 | Chaining 5+ goals per episode | ~3,000,000–6,000,000 | ~1,500–3,000 | ~4,000–7,000 |
 
 **Key factors:**
-- Free-running simulation: steps accumulate far faster than real-time — the bottleneck is the PyTorch backward pass (10 epochs × ~32 mini-batches per 2,048-step rollout).
+- Free-running simulation: steps accumulate far faster than real-time — the bottleneck is the PyTorch backward pass, with multiple epochs and moderate-sized mini-batches per rollout.
 - PPO is generally more sample-efficient than DQN for this task because on-policy updates avoid the experience-staleness problem entirely.
-- **209-input observation space** as of current implementation. Key additions over legacy DQN layout: sin/cos heading encoding, normalised 3-axis velocity + angular velocity, `in_air`/`is_jumping` flags, previous action one-hot (7 actions), and sighting ring buffer.
+- **234-input observation space** as of current implementation. Key additions over legacy DQN layout: sin/cos heading encoding, normalised 3-axis velocity + angular velocity, `in_air`/`is_jumping` flags, previous action history one-hot (4 steps × 8 actions), and sighting ring buffer.
 - **Reward scaling:** all rewards are multiplied by `reward_scale = 0.1` before entering the buffer, keeping discounted returns in a unit-ish range without per-batch normalisation.
-- **LR schedule:** cosine annealing from 0.0001 → 0.00003 over 5,000 episodes.
+- **LR schedule:** cosine annealing from the configured initial LR to the configured minimum LR over the scheduled decay window.
 - Ground rays give an explicit edge signal, eliminating falling-off behaviour early.
 - **Goal LOS gating:** when the goal is behind a wall, interest bias is zeroed and goal inputs show last-known position. The agent must actively search when it loses sight of the goal.
 - Reward shaping (delta-distance + look-alignment) provides a dense gradient signal every step, not just on goal reach.
-- `gamma=0.999`: agent can credit actions taken ~900 steps before a goal reach over a 30 s episode.
+- `gamma` is set close to 1 so the agent can credit actions taken long before a goal reach over the episode horizon.
 - 5 walls (tall, 6 units) significantly increase the exploration requirement.
 - Map size is **100×100** (navigable area ±20 in world space); edge-falling is rare once the agent learns edge detection.
 - **3 simultaneous goals** placed randomly each episode. On goal reach, only the reached goal relocates — the others remain, giving an immediate nearby target.
-- **Curriculum timeout:** goal search limit starts at 60 s and decreases by 0.003 s per episode to a floor of 10 s. Resets on every goal reach.
+- **Curriculum timeout:** goal search limit starts at the configured maximum and decreases by the configured fall rate each episode. Resets on every goal reach.
 
 **Note:** Track **total steps**, not episode count. Early episodes are short (timeout-terminated); later episodes grow longer as the policy improves.
 

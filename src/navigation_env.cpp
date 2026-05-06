@@ -23,11 +23,14 @@ public:
         : m_self(self), m_extra(extra) {}
     bool ShouldCollide(const JPH::BodyID &id) const override
     {
-        if (id == m_self) return false;
+        if (id == m_self)
+            return false;
         for (const auto &x : m_extra)
-            if (id == x) return false;
+            if (id == x)
+                return false;
         return true;
     }
+
 private:
     JPH::BodyID m_self;
     const std::vector<JPH::BodyID> &m_extra;
@@ -40,7 +43,7 @@ void NavigationEnv::bind(EntityManager &em, Entity seeker, std::vector<Entity> g
 
     m_goals.clear();
     {
-        auto [lock, reg] = ((const EntityManager&)em).get_registry();
+        auto [lock, reg] = ((const EntityManager &)em).get_registry();
         for (Entity e : goals)
         {
             Goal g;
@@ -56,16 +59,16 @@ std::vector<float> NavigationEnv::reset()
 {
     Debug::Log("NavigationEnv reset");
     ++m_episode_count;
-    m_step_count       = 0;
+    m_step_count = 0;
     m_goals_this_episode = 0;
-    m_elapsed_seconds  = 0.f;
-    m_time_since_goal  = 0.f;
-    m_done             = false;
-    m_pending_action   = -1;
-    m_prev_action      = -1;
+    m_elapsed_seconds = 0.f;
+    m_time_since_goal = 0.f;
+    m_done = false;
+    m_pending_action = -1;
+    m_prev_action = -1;
 
-    m_current_goal_time_limit = std::max(Episode::min_goal_search_seconds,
-                                         m_current_goal_time_limit - Episode::search_time_fall_rate);
+    m_current_goal_time_limit = std::max(Curriculum::min_goal_search_seconds,
+                                         m_current_goal_time_limit - Curriculum::search_time_fall_rate);
 
     // Clear sighting buffers.
     for (auto &ray_buf : m_sightings)
@@ -73,6 +76,7 @@ std::vector<float> NavigationEnv::reset()
             sg = Sighting{};
 
     m_sight_head.fill(0);
+    m_prev_actions.fill(-1);
 
     // Randomize all goal positions.
     if (m_em && !m_goals.empty())
@@ -89,10 +93,10 @@ std::vector<float> NavigationEnv::reset()
     }
 
     // Return a zero observation to keep Python happy.
-    m_prev_distance           = 0.f;
-    m_last_known_goal_pos     = glm::vec3{0.f};
+    m_prev_distance = 0.f;
+    m_last_known_goal_pos = glm::vec3{0.f};
     m_time_since_goal_visible = SightingConstants::max_stale;
-    m_was_goal_visible        = false;
+    m_was_goal_visible = false;
     return std::vector<float>(NavigationEnv::Sizes::num_states, 0.f);
 }
 
@@ -111,16 +115,16 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     bool in_air;
     bool is_jumping;
     {
-        auto [lock, reg] = ((const EntityManager&)*m_em).get_registry();
+        auto [lock, reg] = ((const EntityManager &)*m_em).get_registry();
         if (!reg.all_of<Transform, Seeker::Data, RigidBody>(m_seeker))
             return obs;
 
-        pos           = reg.get<Transform>(m_seeker).pos;
+        pos = reg.get<Transform>(m_seeker).pos;
         looking_angle = reg.get<Seeker::Data>(m_seeker).looking_angle;
-        body_id       = reg.get<RigidBody>(m_seeker).id;
-        in_air        = reg.get<Seeker::Data>(m_seeker).in_air;
-        is_jumping    = reg.get<Seeker::Data>(m_seeker).is_jumping;
-        m_in_air      = in_air;
+        body_id = reg.get<RigidBody>(m_seeker).id;
+        in_air = reg.get<Seeker::Data>(m_seeker).in_air;
+        is_jumping = reg.get<Seeker::Data>(m_seeker).is_jumping;
+        m_in_air = in_air;
 
         for (auto &g : m_goals)
             if (g.entity != entt::null && reg.all_of<Transform>(g.entity))
@@ -132,21 +136,25 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         m_done = true;
 
     // Accumulate elapsed time for the episode timeout check.
-    m_elapsed_seconds  += dt;
-    m_time_since_goal  += dt;
+    m_elapsed_seconds += dt;
+    m_time_since_goal += dt;
 
     Physics &physics = GetEngine().get_physics();
     JPH::BodyInterface &bi = physics.physics_system.GetBodyInterface();
 
     // Find nearest goal — cached in m_nearest_goal_idx/dist for reuse in compute_reward.
     glm::vec3 goal_pos{0.f};
-    m_nearest_goal_idx  = 0;
+    m_nearest_goal_idx = 0;
     m_nearest_goal_dist = std::numeric_limits<float>::max();
     for (int i = 0; i < (int)m_goals.size(); ++i)
     {
         glm::vec2 d = {m_goals[i].pos.x - pos.x, m_goals[i].pos.z - pos.z};
         float d_len = glm::length(d);
-        if (d_len < m_nearest_goal_dist) { m_nearest_goal_dist = d_len; m_nearest_goal_idx = i; }
+        if (d_len < m_nearest_goal_dist)
+        {
+            m_nearest_goal_dist = d_len;
+            m_nearest_goal_idx = i;
+        }
     }
     if (!m_goals.empty())
         goal_pos = m_goals[m_nearest_goal_idx].pos;
@@ -169,9 +177,9 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     NavIgnoreSelfFilter self_filter(body_id, m_ignored_bodies);
     struct GoalInfo
     {
-        bool              visible;
-        float             bearing; // world-space degrees
-        glm::vec3         offset;  // from seeker
+        bool visible;
+        float bearing;    // world-space degrees
+        glm::vec3 offset; // from seeker
         NavigationEnv::SightingBodyID body_id;
     };
     std::vector<GoalInfo> goal_infos;
@@ -184,12 +192,10 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         JPH::RayCastResult g_los_hit;
         bool g_vis = !physics.physics_system.GetNarrowPhaseQuery()
                           .CastRay(g_los_ray, g_los_hit, {}, {}, self_filter);
-        goal_infos.push_back({
-            g_vis,
-            glm::degrees(std::atan2(to_g.x, to_g.y)),
-            {to_g.x, m_goals[gi].pos.y - pos.y, to_g.y},
-            gi
-        });
+        goal_infos.push_back({g_vis,
+                              glm::degrees(std::atan2(to_g.x, to_g.y)),
+                              {to_g.x, m_goals[gi].pos.y - pos.y, to_g.y},
+                              gi});
     }
 
     // Derive nearest-goal visibility from goal_infos (reuses already-cast rays,
@@ -200,7 +206,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
         // if (!m_was_goal_visible)
         //     Debug::Log("Goal spotted (idx=" + std::to_string(m_nearest_goal_idx)
         //         + ", dist=" + std::to_string(m_nearest_goal_dist) + ")");
-        m_last_known_goal_pos     = goal_pos;
+        m_last_known_goal_pos = goal_pos;
         m_time_since_goal_visible = 0.f;
     }
     else
@@ -270,7 +276,8 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             if (!gi.visible)
                 continue;
             float diff = std::abs(gi.bearing - angle_deg);
-            if (diff > Angles::half_circle_deg) diff = Angles::full_circle_deg - diff;
+            if (diff > Angles::half_circle_deg)
+                diff = Angles::full_circle_deg - diff;
             if (diff <= SPREAD * 0.5f)
                 write_sighting(gi.offset, gi.body_id, SightingConstants::goal_interest);
         }
@@ -294,33 +301,33 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     // Observation layout — derived from structure constants so indices
     // stay in sync automatically if any section size changes.
-    constexpr int section_E_base   = Raycast::num_rays * 2 + Raycast::num_rays * SightingConstants::history * 4;
-    constexpr int section_D_base   = section_E_base + Raycast::num_ground_rays;
-    constexpr int idx_goal_dir_x   = section_D_base + 0;
-    constexpr int idx_goal_dir_z   = section_D_base + 1;
-    constexpr int idx_vel_x        = section_D_base + 2;
-    constexpr int idx_vel_z        = section_D_base + 3;
-    constexpr int idx_vel_y        = section_D_base + 4;
-    constexpr int idx_ang_vel_y    = section_D_base + 5;
-    constexpr int idx_angle_sin    = section_D_base + 6;
-    constexpr int idx_angle_cos    = section_D_base + 7;
-    constexpr int idx_goal_dist    = section_D_base + 8;
+    constexpr int section_E_base = Raycast::num_rays * 2 + Raycast::num_rays * SightingConstants::history * 4;
+    constexpr int section_D_base = section_E_base + Raycast::num_ground_rays;
+    constexpr int idx_goal_dir_x = section_D_base + 0;
+    constexpr int idx_goal_dir_z = section_D_base + 1;
+    constexpr int idx_vel_x = section_D_base + 2;
+    constexpr int idx_vel_z = section_D_base + 3;
+    constexpr int idx_vel_y = section_D_base + 4;
+    constexpr int idx_ang_vel_y = section_D_base + 5;
+    constexpr int idx_angle_sin = section_D_base + 6;
+    constexpr int idx_angle_cos = section_D_base + 7;
+    constexpr int idx_goal_dist = section_D_base + 8;
     constexpr int idx_last_known_x = section_D_base + 9;
     constexpr int idx_last_known_z = section_D_base + 10;
     constexpr int idx_goal_visible = section_D_base + 11;
-    constexpr int idx_staleness    = section_D_base + 12;
-    constexpr int idx_in_air       = section_D_base + 13;
-    constexpr int idx_is_jumping   = section_D_base + 14;
-    constexpr int idx_prev_action  = section_D_base + 15;
+    constexpr int idx_staleness = section_D_base + 12;
+    constexpr int idx_in_air = section_D_base + 13;
+    constexpr int idx_is_jumping = section_D_base + 14;
+    constexpr int idx_prev_action = section_D_base + 15;
 
     // --- Section E: ground / edge-detection rays (section_E_base … section_E_base + num_ground_rays - 1) ---
     // NUM_GROUND_RAYS downward-pitched rays spanning the forward 120° FOV.
     // 1.0 = no ground hit within RAY_LEN = edge of map nearby.
     {
-        const float gSpread    = Raycast::fov_deg / (Raycast::num_ground_rays - 1);
-        const float pitchRad   = glm::radians(Raycast::ground_pitch);
-        const float cosPitch   = std::cos(pitchRad);
-        const float sinPitch   = std::sin(pitchRad); // positive, applied as -y
+        const float gSpread = Raycast::fov_deg / (Raycast::num_ground_rays - 1);
+        const float pitchRad = glm::radians(Raycast::ground_pitch);
+        const float cosPitch = std::cos(pitchRad);
+        const float sinPitch = std::sin(pitchRad); // positive, applied as -y
         for (int i = 0; i < Raycast::num_ground_rays; ++i)
         {
             float angle_deg = looking_angle + (i - Raycast::num_ground_rays / 2) * gSpread;
@@ -359,9 +366,9 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     // idx_vel_x/z/y, idx_ang_vel_y: seeker velocity, normalised by max_speed / max_angular_speed.
     JPH::Vec3 vel = bi.GetLinearVelocity(body_id);
-    obs[idx_vel_x]     = vel.GetX() / Reward::max_speed;
-    obs[idx_vel_z]     = vel.GetZ() / Reward::max_speed;
-    obs[idx_vel_y]     = vel.GetY() / Reward::max_speed;
+    obs[idx_vel_x] = vel.GetX() / Reward::max_speed;
+    obs[idx_vel_z] = vel.GetZ() / Reward::max_speed;
+    obs[idx_vel_y] = vel.GetY() / Reward::max_speed;
     obs[idx_ang_vel_y] = bi.GetAngularVelocity(body_id).GetY() / Reward::max_angular_speed;
     m_speed_xz = std::sqrt(vel.GetX() * vel.GetX() + vel.GetZ() * vel.GetZ());
 
@@ -384,13 +391,16 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     obs[idx_staleness] = std::min(m_time_since_goal_visible / SightingConstants::max_stale, 1.f);
 
     // idx_in_air / idx_is_jumping: binary flags so the agent knows when JUMP is valid.
-    obs[idx_in_air]     = in_air     ? 1.f : 0.f;
+    obs[idx_in_air] = in_air ? 1.f : 0.f;
     obs[idx_is_jumping] = is_jumping ? 1.f : 0.f;
 
-    // idx_prev_action + action index: previous action one-hot (num_actions floats).
-    // All zeros at the start of an episode (m_prev_action == -1).
-    if (m_prev_action >= 0 && m_prev_action < Sizes::num_actions)
-        obs[idx_prev_action + m_prev_action] = 1.f;
+    // Previous action history: one-hot blocks for the last N actions.
+    for (int h = 0; h < Sizes::action_history; ++h)
+    {
+        int action = m_prev_actions[h];
+        if (action >= 0 && action < Sizes::num_actions)
+            obs[idx_prev_action + h * Sizes::num_actions + action] = 1.f;
+    }
 
     return obs;
 }
@@ -425,12 +435,10 @@ float NavigationEnv::compute_reward()
     // is still incentivised to reach goals near the edge.
     float edge_penalty = 0.f;
     {
-        float dist_to_edge = std::min({
-            pos.x - World::min,
-            World::max - pos.x,
-            pos.z - World::min,
-            World::max - pos.z
-        });
+        float dist_to_edge = std::min({pos.x - World::min,
+                                       World::max - pos.x,
+                                       pos.z - World::min,
+                                       World::max - pos.z});
         if (dist_to_edge < Reward::edge_danger_dist)
         {
             float t = 1.f - dist_to_edge / Reward::edge_danger_dist; // 0 at threshold, 1 at boundary
@@ -439,12 +447,12 @@ float NavigationEnv::compute_reward()
     }
 
     // Use nearest goal cached by get_observation this step.
-    int   nearest_idx  = m_nearest_goal_idx;
-    float dist         = m_nearest_goal_dist;
-    glm::vec2 to_goal  = {m_goals[nearest_idx].pos.x - pos.x, m_goals[nearest_idx].pos.z - pos.z};
+    int nearest_idx = m_nearest_goal_idx;
+    float dist = m_nearest_goal_dist;
+    glm::vec2 to_goal = {m_goals[nearest_idx].pos.x - pos.x, m_goals[nearest_idx].pos.z - pos.z};
 
     // Reached goal — big reward, relocate that goal, keep episode alive.
-    if (dist <= Episode::goal_radius)
+    if (dist <= World::goal_radius)
     {
         std::uniform_real_distribution<float> rdist(World::min * World::spawn_margin, World::max * World::spawn_margin);
         m_goals[nearest_idx].pos.x = rdist(m_rng);
@@ -474,8 +482,7 @@ float NavigationEnv::compute_reward()
         m_was_goal_visible = false;
 
         // Speed bonus: full bonus if reached within quick_threshold, linear ramp to 0 beyond it.
-        float speed_bonus = Reward::goal_speed_bonus
-            * std::max(0.f, 1.f - m_time_since_goal / Reward::goal_quick_threshold);
+        float speed_bonus = Reward::goal_speed_bonus * std::max(0.f, 1.f - m_time_since_goal / Reward::goal_quick_threshold);
 
         m_time_since_goal = 0.f;
 
@@ -502,7 +509,7 @@ float NavigationEnv::compute_reward()
     float angle_diff = goal_world_angle - looking_angle;
     float look_alignment = std::cos(glm::radians(angle_diff));
     float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? Reward::strafe_penalty : 0.f;
-    float fwd_bonus   = (pending_action() == Seeker::MOVE_FORWARD && !m_in_air) ? Reward::forward_reward : 0.f;
+    float fwd_bonus = (pending_action() == Seeker::MOVE_FORWARD && !m_in_air) ? Reward::forward_reward : 0.f;
 
     // Stuck penalty: if the agent is trying to move but barely going anywhere,
     // it's probably wedged against a wall. Penalise to encourage going around.
@@ -510,8 +517,7 @@ float NavigationEnv::compute_reward()
     if (m_step_count > 1 && !m_in_air && m_speed_xz < Reward::stuck_speed_threshold)
     {
         Seeker::Action a = pending_action();
-        if (a == Seeker::MOVE_FORWARD || a == Seeker::MOVE_BACKWARD
-            || a == Seeker::STRAFE_LEFT || a == Seeker::STRAFE_RIGHT)
+        if (a == Seeker::MOVE_FORWARD || a == Seeker::MOVE_BACKWARD || a == Seeker::STRAFE_LEFT || a == Seeker::STRAFE_RIGHT)
             stuck_pen = -Reward::stuck_penalty;
     }
 
@@ -520,10 +526,7 @@ float NavigationEnv::compute_reward()
 
 bool NavigationEnv::is_done() const
 {
-    return m_done
-        || m_step_count      >= Episode::max_steps
-        || m_elapsed_seconds >= Episode::max_seconds
-        || m_time_since_goal >= m_current_goal_time_limit;
+    return m_done || m_step_count >= Episode::max_steps || m_elapsed_seconds >= Episode::max_seconds || m_time_since_goal >= m_current_goal_time_limit;
 }
 
 bool NavigationEnv::is_terminal() const
@@ -537,7 +540,11 @@ bool NavigationEnv::is_terminal() const
 
 void NavigationEnv::apply_action(int action)
 {
-    m_prev_action    = m_pending_action;
+    for (int i = Sizes::action_history - 1; i > 0; --i)
+        m_prev_actions[i] = m_prev_actions[i - 1];
+    m_prev_actions[0] = m_pending_action;
+
+    m_prev_action = m_pending_action;
     m_pending_action = action;
     ++m_step_count;
 }
@@ -589,15 +596,21 @@ std::unordered_map<std::string, float> NavigationEnv::get_env_data() const
 {
     return {
         {"current_goal_time_limit", m_current_goal_time_limit},
-        {"episode_count",           static_cast<float>(m_episode_count)},
+        {"episode_count", static_cast<float>(m_episode_count)},
     };
 }
 
-std::unordered_map<std::string, float> NavigationEnv::get_config_data() const
+std::unordered_map<std::string, std::unordered_map<std::string, float>> NavigationEnv::get_config_data() const
 {
     return {
-        {"min_goal_search_seconds", Episode::min_goal_search_seconds},
-        {"max_goal_search_seconds", Episode::max_goal_search_seconds},
+        {"sizes", {{"num_states", Sizes::num_states}, {"num_actions", Sizes::num_actions}, {"action_history", Sizes::action_history}, {"num_goals", Sizes::num_goals}}},
+        {"raycast", {{"num_rays", Raycast::num_rays}, {"num_ground_rays", Raycast::num_ground_rays}, {"ray_len", Raycast::ray_len}, {"ground_pitch", Raycast::ground_pitch}, {"fov_deg", Raycast::fov_deg}}},
+        {"sighting", {{"history", SightingConstants::history}, {"max_age", SightingConstants::max_age}, {"max_stale", SightingConstants::max_stale}, {"wall_interest", SightingConstants::wall_interest}, {"goal_interest", SightingConstants::goal_interest}}},
+        {"world", {{"min", World::min}, {"max", World::max}, {"death_height", World::death_height}, {"spawn_margin", World::spawn_margin}, {"goal_radius", World::goal_radius}}},
+        {"episode", {{"max_steps", Episode::max_steps}, {"max_seconds", Episode::max_seconds}}},
+        {"curriculum", {{"max_goal_search_seconds", Curriculum::max_goal_search_seconds}, {"min_goal_search_seconds", Curriculum::min_goal_search_seconds}, {"search_time_fall_rate", Curriculum::search_time_fall_rate}, {"boundary_wall_episodes", Curriculum::boundary_wall_episodes}}},
+        {"reward", {{"goal_reward", Reward::goal_reward}, {"goal_speed_bonus", Reward::goal_speed_bonus}, {"goal_quick_threshold", Reward::goal_quick_threshold}, {"look_weight", Reward::look_weight}, {"action_penalty", Reward::action_penalty}, {"strafe_penalty", Reward::strafe_penalty}, {"edge_danger_dist", Reward::edge_danger_dist}, {"edge_danger_penalty", Reward::edge_danger_penalty}, {"stuck_speed_threshold", Reward::stuck_speed_threshold}, {"stuck_penalty", Reward::stuck_penalty}, {"forward_reward", Reward::forward_reward}, {"max_speed", Reward::max_speed}, {"max_angular_speed", Reward::max_angular_speed}, {"fall_penalty", Reward::fall_penalty}}},
+        {"angles", {{"full_circle_deg", Angles::full_circle_deg}, {"half_circle_deg", Angles::half_circle_deg}, {"deg_to_rad", Angles::deg_to_rad}}},
     };
 }
 
@@ -611,4 +624,3 @@ void NavigationEnv::set_env_data(const std::unordered_map<std::string, float> &d
     if (it2 != data.end())
         m_episode_count = static_cast<int>(it2->second);
 }
-

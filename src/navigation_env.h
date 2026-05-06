@@ -22,13 +22,6 @@ struct Goal
 class NavigationEnv
 {
 public:
-    struct Sizes
-    {
-        static constexpr int num_states = 210;
-        static constexpr int num_actions = 8;
-        static constexpr int num_goals   = 3;
-    };
-
     struct Raycast
     {
         static constexpr int   num_rays        = 13;
@@ -53,21 +46,21 @@ public:
         static constexpr float max             = 20.0f;
         static constexpr float death_height    = -10.f;
         static constexpr float spawn_margin    = 0.8f;   // fraction of world bounds used for goal spawn
+
+        static constexpr float goal_radius             = 1.25f;
     };
 
     struct Episode
     {
         static constexpr int   max_steps               = 100000;
-        static constexpr float goal_radius             = 1.25f;
-
         static constexpr float max_seconds             = 300.f;
-        static constexpr float max_goal_search_seconds = 60.f;
-        static constexpr float min_goal_search_seconds = 20.f;
-        static constexpr float search_time_fall_rate   = 0.05f;
     };
 
     struct Curriculum
     {
+        static constexpr float max_goal_search_seconds = 60.f;
+        static constexpr float min_goal_search_seconds = 20.f;
+        static constexpr float search_time_fall_rate   = 0.05f;
         // Episodes to keep boundary walls active (curriculum learning).
         // LearnScene creates the walls; after this many resets it removes them.
         // Set to 0 to disable the curriculum (no walls ever created).
@@ -99,6 +92,19 @@ public:
         static constexpr float deg_to_rad      = 3.14159265358979323846f / 180.f;
     };
 
+    struct Sizes
+    {
+        static constexpr int num_actions      = 8;
+        static constexpr int action_history   = 4;
+        static constexpr int num_goals        = 3;
+        static constexpr int num_states =
+            Raycast::num_rays * 2 +
+            Raycast::num_rays * SightingConstants::history * 4 +
+            Raycast::num_ground_rays +
+            15 +
+            num_actions * action_history;
+    };
+
     using SightingBodyID = std::variant<JPH::BodyID, int>;
 
     void bind(Magic::EntityManager &em, Magic::Entity seeker, std::vector<Magic::Entity> goals);
@@ -116,7 +122,7 @@ public:
     Seeker::Action                             pending_action() const;
     std::unordered_map<std::string, float>     get_env_data() const;
     void                                       set_env_data(const std::unordered_map<std::string, float> &data);
-    std::unordered_map<std::string, float>     get_config_data() const;
+    std::unordered_map<std::string, std::unordered_map<std::string, float>>     get_config_data() const;
     int                                        episode_count() const { return m_episode_count; }
     void                                       disable_goal_timeout() { m_current_goal_time_limit = std::numeric_limits<float>::max(); }
 
@@ -135,9 +141,10 @@ private:
     bool      m_was_goal_visible        = false; // edge-detection: log only on first visible frame
     float     m_speed_xz                = 0.f;   // cached by get_observation, consumed by compute_reward
     int       m_episode_count           = 0;   // total resets; used by LearnScene for curriculum
+    std::array<int, Sizes::action_history> m_prev_actions{};
     float     m_elapsed_seconds         = 0.f;
     float     m_time_since_goal         = 0.f;
-    float     m_current_goal_time_limit = Episode::max_goal_search_seconds;
+    float     m_current_goal_time_limit = Curriculum::max_goal_search_seconds;
     bool      m_done             = false;
     int       m_step_count      = 0;
     int       m_goals_this_episode = 0;

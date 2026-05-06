@@ -144,10 +144,10 @@ struct SeekerUpdateHandler
                     vec -= forward;
                     break;
                 case Seeker::STRAFE_LEFT:
-                    vec -= glm::normalize(glm::cross(forward, {0, 1, 0}));
+                    vec -= glm::normalize(glm::cross(forward, {0, 1, 0})) * data.strafe_mult;
                     break;
                 case Seeker::STRAFE_RIGHT:
-                    vec += glm::normalize(glm::cross(forward, {0, 1, 0}));
+                    vec += glm::normalize(glm::cross(forward, {0, 1, 0})) * data.strafe_mult;
                     break;
                 case Seeker::TURN_LEFT:
                     data.looking_angle += data.turn_speed * (float)dt;

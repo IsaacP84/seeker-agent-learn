@@ -18,14 +18,7 @@ A reinforcement learning agent that learns navigation using the [Magic-Engine](h
 
 ## Setup
 
-The `engine/` directory contains prebuilt binaries for Magic-Engine and is **not stored in this repository**. Download it before building:
-
-```powershell
-.\download-engine.ps1
-```
-
-This downloads `engine.zip` from the latest GitHub release and extracts it locally.
-To force a re-download: `.\download-engine.ps1 -Force`
+The `engine/` directory contains prebuilt binaries for Magic-Engine.
 
 ## Build
 

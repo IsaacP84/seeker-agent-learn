@@ -37,6 +37,8 @@ public:
         float turn_speed; // degrees per second
         float looking_angle = 0;  // in degrees
 
+        float strafe_mult = 0.75f; // strafe speed is this fraction of forward speed
+
         // Optional override: if set, replaces the SeekerUpdateHandler on_move callback.
         std::function<Action(Magic::EntityManager &, Magic::Entity, double)> on_move_override;
     };

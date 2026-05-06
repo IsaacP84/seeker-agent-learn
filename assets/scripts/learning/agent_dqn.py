@@ -83,6 +83,18 @@ def find_latest_checkpoint(model_file=None):
     return None
 
 
+def _load_patch_config(config_json=None):
+    if config_json is not None:
+        with open(config_json, 'r') as f:
+            return json.load(f)
+
+    try:
+        env = Magic.NavigationEnv()
+        return env.get_config_data()
+    except Exception as e:
+        raise RuntimeError(f'Unable to obtain current env config from Magic.NavigationEnv(): {e}')
+
+
 def patch_checkpoint_epsilon(checkpoint_file=None, epsilon=1.0, backup=True, model_file=None):
     if checkpoint_file is None:
         checkpoint_file = find_latest_checkpoint(model_file=model_file)
@@ -99,6 +111,25 @@ def patch_checkpoint_epsilon(checkpoint_file=None, epsilon=1.0, backup=True, mod
     checkpoint['epsilon'] = epsilon
     torch.save(checkpoint, checkpoint_file)
     print(f'Patched checkpoint: {checkpoint_file} (epsilon={epsilon})')
+
+
+def patch_checkpoint_env_config(checkpoint_file=None, backup=True, model_file=None, config_json=None):
+    if checkpoint_file is None:
+        checkpoint_file = find_latest_checkpoint(model_file=model_file)
+
+    if checkpoint_file is None:
+        raise FileNotFoundError("No checkpoint file found to patch.")
+
+    if backup:
+        backup_file = checkpoint_file + '.bak'
+        shutil.copy2(checkpoint_file, backup_file)
+        print(f'Created backup: {backup_file}')
+
+    checkpoint = torch.load(checkpoint_file, map_location=device)
+    env_config = _load_patch_config(config_json)
+    checkpoint['env_config'] = env_config
+    torch.save(checkpoint, checkpoint_file)
+    print(f'Patched checkpoint config: {checkpoint_file}')
 
 
 class Agent:
@@ -233,17 +264,55 @@ class Agent:
                     ckpt_inputs = state_dict[first_weight_key].shape[1]
                     ckpt_outputs = state_dict[last_weight_key].shape[0]
                     if ckpt_inputs != num_states or ckpt_outputs != num_actions:
-                        print(
-                            f'Warning: checkpoint input/output mismatch '
-                            f'(checkpoint: {ckpt_inputs} inputs, {ckpt_outputs} outputs; '
-                            f'current: {num_states} inputs, {num_actions} outputs). '
-                            f'Skipping checkpoint — starting fresh.'
-                        )
-                        latest_checkpoint = None
+                        if 'env_config' not in checkpoint:
+                            print(
+                                f'Warning: checkpoint input/output mismatch '
+                                f'(checkpoint: {ckpt_inputs} inputs, {ckpt_outputs} outputs; '
+                                f'current: {num_states} inputs, {num_actions} outputs) and env_config is missing. '
+                                'Checkpoint loading will fail.'
+                            )
+                            latest_checkpoint = None
+                            adapted_checkpoint = False
+                        else:
+                            print(
+                                f'Warning: checkpoint input/output mismatch '
+                                f'(checkpoint: {ckpt_inputs} inputs, {ckpt_outputs} outputs; '
+                                f'current: {num_states} inputs, {num_actions} outputs). '
+                                f'Attempting to adapt checkpoint to current model.'
+                            )
+                            try:
+                                from learning.checkpoint_adapter import load_state_dict_with_adapt
+                                new_config = None
+                                try:
+                                    new_config = Magic.NavigationEnv().get_config_data()
+                                except Exception:
+                                    pass
+                                load_state_dict_with_adapt(
+                                    self.policy_dqn,
+                                    state_dict,
+                                    old_config=checkpoint.get('env_config'),
+                                    new_config=new_config,
+                                )
+                                load_state_dict_with_adapt(
+                                    self.target_dqn,
+                                    state_dict,
+                                    old_config=checkpoint.get('env_config'),
+                                    new_config=new_config,
+                                )
+                                adapted_checkpoint = True
+                            except Exception as e:
+                                print(f'Failed to adapt checkpoint: {e}. Starting fresh.')
+                                latest_checkpoint = None
+                                adapted_checkpoint = False
+                    else:
+                        adapted_checkpoint = False
+                else:
+                    adapted_checkpoint = False
 
                 if latest_checkpoint:
-                    self.policy_dqn.load_state_dict(state_dict)
-                    self.target_dqn.load_state_dict(state_dict)
+                    if not adapted_checkpoint:
+                        self.policy_dqn.load_state_dict(state_dict)
+                        self.target_dqn.load_state_dict(state_dict)
                     if is_training:
                         if 'optimizer' in checkpoint:
                             self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -454,6 +523,7 @@ class Agent:
             }
             if self._env is not None:
                 checkpoint_data['env_data'] = self._env.get_env_data()
+                checkpoint_data['env_config'] = self._env.get_config_data()
 
             # Save rolling checkpoint every episode.
             torch.save(checkpoint_data, self.MODEL_FILE)
@@ -647,12 +717,22 @@ if __name__ == '__main__':
     parser.add_argument('--train', help="Training mode", action='store_true')
     parser.add_argument('--patch-epsilon', type=float,
                         help='Patch checkpoint epsilon without altering training data')
+    parser.add_argument('--patch-config', action='store_true',
+                        help='Patch checkpoint to include env_config for layout-aware loading')
+    parser.add_argument('--config-json', help='Optional JSON file for env_config instead of current env')
     parser.add_argument('--checkpoint-file', help='Optional checkpoint file path to patch')
     args = parser.parse_args()
 
     if args.patch_epsilon is not None:
         patch_checkpoint_epsilon(args.checkpoint_file, args.patch_epsilon,
                                  backup=True, model_file=os.path.join(RUNS_DIR, f'{args.hyperparameters}.pt'))
+    elif args.patch_config:
+        patch_checkpoint_env_config(
+            args.checkpoint_file,
+            backup=True,
+            model_file=os.path.join(RUNS_DIR, f'{args.hyperparameters}.pt'),
+            config_json=args.config_json,
+        )
     else:
         dql = Agent(hyperparameter_set=args.hyperparameters)
         if args.train:
