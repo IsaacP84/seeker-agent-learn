@@ -90,8 +90,8 @@ std::vector<float> NavigationEnv::reset()
 
     // Return a zero observation to keep Python happy.
     m_prev_distance           = 0.f;
-    m_last_known_goal_pos     = m_goals.empty() ? glm::vec3{0.f} : m_goals[0].pos;
-    m_time_since_goal_visible = 0.f;
+    m_last_known_goal_pos     = glm::vec3{0.f};
+    m_time_since_goal_visible = SightingConstants::max_stale;
     m_was_goal_visible        = false;
     return std::vector<float>(NavigationEnv::Sizes::num_states, 0.f);
 }
