@@ -11,13 +11,19 @@ and optionally publishes a GitHub release using the gh CLI.
 [CmdletBinding()]
 param(
     [string]
+    $RepoUrl = "https://github.com/IsaacP84/seeker-agent-learn.git",
+
+    [string]
+    $CloneDir = "$PSScriptRoot\temp-clone-release",
+
+    [string]
     $BuildDir = "temp-build-release",
 
     [string]
     $InstallDir = "temp-install-release-windows",
 
     [string]
-    $MagicDir = "$PSScriptRoot\engine\lib\cmake\Magic",
+    $MagicDir = "engine\lib\cmake\Magic",
 
     [string]
     $PythonRoot = "C:/Github/magic-engine/python",
@@ -59,19 +65,43 @@ $ErrorActionPreference = 'Stop'
 
 function Resolve-TargetPath {
     param(
-        [string]$Path
+        [string]$Path,
+        [string]$Base
     )
     if ([System.IO.Path]::IsPathRooted($Path)) {
         return $Path
     }
-    return Join-Path -Path $PSScriptRoot -ChildPath $Path
+    return Join-Path -Path $Base -ChildPath $Path
 }
 
-$BuildDirFull = Resolve-TargetPath $BuildDir
-$InstallDirFull = Resolve-TargetPath $InstallDir
-$ZipPathFull = Resolve-TargetPath $ZipPath
+$CloneDirFull = Resolve-TargetPath $CloneDir $PSScriptRoot
 
-Write-Host "Repo root: $PSScriptRoot"
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    throw "Git is not installed or not available in PATH. Cannot clone repository."
+}
+
+if (Test-Path $CloneDirFull) {
+    Write-Host "Removing existing clone directory: $CloneDirFull"
+    Remove-Item -Recurse -Force $CloneDirFull
+}
+
+Write-Host "Cloning repository $RepoUrl into $CloneDirFull"
+& git clone $RepoUrl $CloneDirFull
+if ($LASTEXITCODE -ne 0) {
+    throw "Git clone failed with exit code $LASTEXITCODE"
+}
+
+$RepoRoot = $CloneDirFull
+
+$BuildDirFull = Resolve-TargetPath $BuildDir $RepoRoot
+$InstallDirFull = Resolve-TargetPath $InstallDir $RepoRoot
+$ZipPathFull = Resolve-TargetPath $ZipPath $PSScriptRoot
+
+if (-not [System.IO.Path]::IsPathRooted($MagicDir)) {
+    $MagicDir = Join-Path -Path $RepoRoot -ChildPath $MagicDir
+}
+
+Write-Host "Repo root: $RepoRoot"
 Write-Host "Build directory: $BuildDirFull"
 Write-Host "Install directory: $InstallDirFull"
 Write-Host "Magic DIR: $MagicDir"
@@ -89,7 +119,7 @@ New-Item -ItemType Directory -Force -Path $InstallDirFull | Out-Null
 
 Write-Host "Configuring release build..."
 $configureArgs = @(
-    '-S', $PSScriptRoot,
+    '-S', $RepoRoot,
     '-B', $BuildDirFull,
     '-G', 'Ninja',
     '-DCMAKE_BUILD_TYPE=Release',
