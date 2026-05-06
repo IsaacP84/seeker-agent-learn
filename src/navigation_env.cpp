@@ -455,14 +455,23 @@ float NavigationEnv::compute_reward()
         Debug::Log("Seeker_" + std::to_string(m_agent_id) + " collected goal " + std::to_string(nearest_idx) +
                    " (goals this episode: " + std::to_string(++m_goals_this_episode) + ")");
 
-        // Update prev_distance to nearest remaining goal after relocation.
+        // Update prev_distance and last-known goal to the nearest current goal after relocation.
         float new_nearest = std::numeric_limits<float>::max();
+        glm::vec3 new_nearest_goal_pos = m_goals[nearest_idx].pos;
         for (const auto &g : m_goals)
         {
             glm::vec2 d = {g.pos.x - pos.x, g.pos.z - pos.z};
-            new_nearest = std::min(new_nearest, glm::length(d));
+            float len = glm::length(d);
+            if (len < new_nearest)
+            {
+                new_nearest = len;
+                new_nearest_goal_pos = g.pos;
+            }
         }
-        m_prev_distance   = new_nearest;
+        m_prev_distance = new_nearest;
+        m_last_known_goal_pos = new_nearest_goal_pos;
+        m_time_since_goal_visible = SightingConstants::max_stale;
+
         // Speed bonus: full bonus if reached within quick_threshold, linear ramp to 0 beyond it.
         float speed_bonus = Reward::goal_speed_bonus
             * std::max(0.f, 1.f - m_time_since_goal / Reward::goal_quick_threshold);
