@@ -11,7 +11,7 @@ if(NOT DEFINED Magic_DIR)
     message(FATAL_ERROR "Magic_DIR must be defined and point to the Magic-Engine app source directory")
 endif()
 
-option(ENABLE_TRACY "Enable Tracy profiler" ON)
+option(ENABLE_TRACY "Enable Tracy profiler" OFF)
 set(TRACY_REQUIRED_VERSION "0.13.1")
 if(ENABLE_TRACY)
     set(TRACY_VERSION_FILE "${PROJECT_SOURCE_DIR}/extern/tracy/public/common/TracyVersion.hpp")
