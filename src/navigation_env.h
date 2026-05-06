@@ -62,8 +62,8 @@ public:
 
         static constexpr float max_seconds             = 300.f;
         static constexpr float max_goal_search_seconds = 60.f;
-        static constexpr float min_goal_search_seconds = 10.f;
-        static constexpr float search_time_fall_rate   = 0.1f;
+        static constexpr float min_goal_search_seconds = 20.f;
+        static constexpr float search_time_fall_rate   = 0.05f;
     };
 
     struct Curriculum

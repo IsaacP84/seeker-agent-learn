@@ -471,6 +471,7 @@ float NavigationEnv::compute_reward()
         m_prev_distance = new_nearest;
         m_last_known_goal_pos = new_nearest_goal_pos;
         m_time_since_goal_visible = SightingConstants::max_stale;
+        m_was_goal_visible = false;
 
         // Speed bonus: full bonus if reached within quick_threshold, linear ramp to 0 beyond it.
         float speed_bonus = Reward::goal_speed_bonus
