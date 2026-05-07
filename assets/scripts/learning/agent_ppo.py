@@ -67,6 +67,9 @@ def _load_checkpoint(path):
 
 
 def find_latest_checkpoint(model_file=None):
+    if model_file and os.path.exists(model_file):
+        return model_file
+
     pt_files = [
         os.path.join(RUNS_DIR, f)
         for f in os.listdir(RUNS_DIR)
@@ -85,8 +88,6 @@ def find_latest_checkpoint(model_file=None):
             chosen = max(asset_pt_files, key=os.path.getmtime)
             print(f'No checkpoint in runs/, falling back to assets: {chosen}')
             return chosen
-    if model_file and os.path.exists(model_file):
-        return model_file
     return None
 
 
@@ -244,29 +245,34 @@ class Agent:
         self.goal_reach_history     = []
 
         # Locate checkpoint
-        pt_files = [
-            os.path.join(RUNS_DIR, f)
-            for f in os.listdir(RUNS_DIR)
-            if f.endswith('.pt')
-        ] if os.path.isdir(RUNS_DIR) else []
-        latest_checkpoint = (
-            max(pt_files, key=os.path.getmtime) if pt_files
-            else self.MODEL_FILE if os.path.exists(self.MODEL_FILE) else None
-        )
-        if latest_checkpoint is None:
-            assets_runs = _assets_runs_dir()
-            if assets_runs and os.path.isdir(assets_runs):
-                asset_pt_files = [
-                    os.path.join(assets_runs, f)
-                    for f in os.listdir(assets_runs)
-                    if f.endswith('.pt')
-                ]
-                if asset_pt_files:
-                    latest_checkpoint = max(asset_pt_files, key=os.path.getmtime)
-                    print(f'No checkpoint in runs/, falling back to assets: {latest_checkpoint}')
-
+        latest_checkpoint = None
         if load_model_file:
-            latest_checkpoint = load_model_file
+            if os.path.exists(load_model_file):
+                latest_checkpoint = load_model_file
+            else:
+                print(f'Configured load_model path not found: {load_model_file}. Falling back to normal checkpoint search.')
+
+        if latest_checkpoint is None:
+            pt_files = [
+                os.path.join(RUNS_DIR, f)
+                for f in os.listdir(RUNS_DIR)
+                if f.endswith('.pt')
+            ] if os.path.isdir(RUNS_DIR) else []
+            latest_checkpoint = (
+                max(pt_files, key=os.path.getmtime) if pt_files
+                else self.MODEL_FILE if os.path.exists(self.MODEL_FILE) else None
+            )
+            if latest_checkpoint is None:
+                assets_runs = _assets_runs_dir()
+                if assets_runs and os.path.isdir(assets_runs):
+                    asset_pt_files = [
+                        os.path.join(assets_runs, f)
+                        for f in os.listdir(assets_runs)
+                        if f.endswith('.pt')
+                    ]
+                    if asset_pt_files:
+                        latest_checkpoint = max(asset_pt_files, key=os.path.getmtime)
+                        print(f'No checkpoint in runs/, falling back to assets: {latest_checkpoint}')
 
         if latest_checkpoint:
             actor_loaded_from_adapt = False
@@ -820,8 +826,6 @@ class Agent:
         if self._env is not None:
             checkpoint_data['env_data'] = self._env.get_env_data()
             checkpoint_data['env_config'] = self._env.get_config_data()
-        if model_path != self.MODEL_FILE:
-            self.MODEL_FILE = model_path
 
         if self.save_diagnostics_separately:
             diag_path = self._save_diagnostics_file()
