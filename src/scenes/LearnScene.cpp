@@ -138,7 +138,7 @@ void LearnScene::onActivate()
     // Walls — static obstacles the agent must navigate around.
     // pos is the base (floor-level) centre; half_extents defines size from there.
     // Map is now ±20 so all positions scaled ~2× from the old ±10 layout.
-    makeWall(em, {0.f,    0.f,  0.f},  {1.5f,   3.f, 0.25f}); // smaller centre barrier
+    makeWall(em, {0.f,    0.f,  0.f},  {1.5f,   1.5f, 0.25f}); // smaller centre barrier
     makeWall(em, {-8.f,   0.f,  6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (left)
     makeWall(em, {8.f,    0.f, -6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (right)
     makeWall(em, {-14.f,  0.f, -8.f},  {0.25f,  3.f, 8.f});   // far left vertical

@@ -8,7 +8,7 @@
 
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
-
+#include "../navigation_env.h"
 #include "../util.h"
 
 Entity makeCube(EntityManager &em, int index)
@@ -120,8 +120,8 @@ Entity makeGround(EntityManager &em, bool do_mesh)
     float x = 0.0;
     float y = 0.0;
     float z = 0.0;
-    float w = 100;
-    float l = 100;
+    float w = NavigationEnv::World::max * 2.f;
+    float l = NavigationEnv::World::max * 2.f;
 
     if (do_mesh)
     {
