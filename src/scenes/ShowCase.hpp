@@ -13,13 +13,15 @@ namespace nb = nanobind;
 #include <memory>
 #include <vector>
 
-class NavigationEnv;  // forward declaration — full definition in navigation_env.h
+class NavigationEnv;
 
-class LearnScene : public Magic::Scene, PauseHelper
+// Inference-only scene with a different wall layout for testing trained models.
+// Never calls feedback() — the agent always runs greedy (IS_TRAINING=false).
+class ShowCase : public Magic::Scene, PauseHelper
 {
 public:
-    LearnScene(Magic::SceneManager &sm);
-    ~LearnScene();
+    ShowCase(Magic::SceneManager &sm);
+    ~ShowCase();
 
     void onCreate() override;
     void onDestroy() override;
@@ -28,11 +30,10 @@ public:
     void update(double dt) override;
     void handle_input(const SDL_Event &) override;
 
-protected:
-     virtual void make_map();
-     virtual void implement_curriculum(int episode_count);
-
 private:
+    nb::object m_python_scene;
+    nb::object m_step_func;
+
     struct AgentSlot {
         Seeker                         seeker;
         std::vector<Magic::Entity>     goals;
@@ -48,15 +49,6 @@ private:
     std::vector<Magic::Entity> m_boundary_walls;
     bool                       m_walls_removed = false;
 
-    nb::object m_python_scene;
-    nb::object m_step_func;
-    nb::object m_feedback_func;
-    nb::object m_round_complete_func;
-    bool m_has_feedback       = false;
-    bool m_has_round_complete = false;
-    bool m_is_training = true;
-
-    void remove_boundary_walls();
+    
     void _clear_python_env_refs();
 };
-

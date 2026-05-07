@@ -9,6 +9,8 @@ add_executable(app
 
     scenes/StartScene.cpp
     scenes/LearnScene.cpp
+    scenes/EdgeDangerScene.cpp
+    scenes/ShowCase.cpp
     scenes/TestScene.cpp
     scenes/LoadingScene.cpp
     scenes/factory.cpp

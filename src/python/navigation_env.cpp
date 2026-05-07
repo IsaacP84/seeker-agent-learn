@@ -25,6 +25,7 @@ void init_navigation(nb::module_ &m)
         .def_prop_ro_static("num_actions", [](nb::object) { return NavigationEnv::Sizes::num_actions; })
         .def("get_env_data",    &NavigationEnv::get_env_data)
         .def("set_env_data",    &NavigationEnv::set_env_data)
-        .def("get_config_data", &NavigationEnv::get_config_data);
+        .def("get_config_data", &NavigationEnv::get_config_data)
+        .def("set_config_data", &NavigationEnv::set_config_data);
 }
 

@@ -13,14 +13,27 @@
 #include <algorithm>
 #include <limits>
 
-
 #ifdef TRACY_ENABLE
-#    include <tracy/Tracy.hpp>
+#include <tracy/Tracy.hpp>
 #else
-#    define ZoneScoped
+#define ZoneScoped
 #endif
 
 using namespace Magic;
+
+std::vector<Goal> NavigationEnv::s_goals;
+
+Goal NavigationEnv::get_next_goal(int idx)
+{
+    on_next_goal(); // callback for user code to update the static pattern if desired (e.g. to make it dynamic or procedurally generated), but default is to just loop through the originally loaded pattern
+    Goal goal;
+    goal.pos = glm::vec3{0.f};
+    goal.entity = entt::null;
+    
+    if (!NavigationEnv::get_goals().empty())
+        goal.pos = NavigationEnv::get_goals()[idx % NavigationEnv::get_goals().size()].pos;
+    return goal;
+}
 
 // Ignore the seeker body when raycasting (same pattern as seeker.cpp).
 class NavIgnoreSelfFilter : public JPH::BodyFilter
@@ -50,13 +63,30 @@ void NavigationEnv::bind(EntityManager &em, Entity seeker, std::vector<Entity> g
 
     m_goals.clear();
     {
-        auto [lock, reg] = ((const EntityManager &)em).get_registry();
-        for (Entity e : goals)
+        auto [lock, reg] = em.get_registry();
+
+        if (s_goals.empty())
         {
-            Goal g;
-            g.entity = e;
-            if (e != entt::null && reg.all_of<Transform>(e))
-                g.pos = reg.get<Transform>(e).pos;
+            s_goals.reserve(goals.size());
+            for (Entity e : goals)
+            {
+                Goal g;
+                g.entity = entt::null;
+                if (e != entt::null && reg.all_of<Transform>(e))
+                    g.pos = reg.get<Transform>(e).pos;
+                s_goals.push_back(g);
+            }
+        }
+
+        for (int i = 0; i < (int)goals.size(); ++i)
+        {
+            Goal g = get_next_goal(i);
+            g.entity = goals[i];
+            if (g.entity != entt::null && reg.all_of<Transform>(g.entity))
+            {
+                auto &transform = reg.get<Transform>(g.entity);
+                transform.pos = g.pos;
+            }
             m_goals.push_back(g);
         }
     }
@@ -75,8 +105,11 @@ std::vector<float> NavigationEnv::reset()
     m_pending_action = -1;
     m_prev_action = -1;
 
-    m_current_goal_time_limit = std::max(Curriculum::min_goal_search_seconds,
-                                         m_current_goal_time_limit - Curriculum::search_time_fall_rate);
+    if (m_episode_count == 1)
+        m_current_goal_time_limit = m_config.curriculum.max_goal_search_seconds;
+    else
+        m_current_goal_time_limit = std::max(m_config.curriculum.min_goal_search_seconds,
+                                             m_current_goal_time_limit - m_config.curriculum.search_time_fall_rate);
 
     // Clear sighting buffers.
     for (auto &ray_buf : m_sightings)
@@ -90,14 +123,27 @@ std::vector<float> NavigationEnv::reset()
     if (m_em && !m_goals.empty())
     {
         auto [lock, reg] = m_em->get_registry();
-        std::uniform_real_distribution<float> rdist(World::min * World::spawn_margin, World::max * World::spawn_margin);
-        for (auto &g : m_goals)
+        m_goals.clear();
+        for (int i = 0; i < (int)m_config.world.num_concurrent_goals; ++i)
         {
-            g.pos.x = rdist(m_rng);
-            g.pos.z = rdist(m_rng);
-            if (g.entity != entt::null && reg.all_of<Transform>(g.entity))
-                reg.get<Transform>(g.entity).pos = g.pos;
+            m_goals.push_back(get_next_goal(i));
+            if (m_goals[i].entity != entt::null && reg.all_of<Transform>(m_goals[i].entity))
+            {
+                auto &transform = reg.get<Transform>(m_goals[i].entity);
+                transform.pos = m_goals[i].pos;
+            }
         }
+        // std::uniform_real_distribution<float> rdist(m_config.world.min * m_config.world.spawn_margin, m_config.world.max * m_config.world.spawn_margin);
+        // for (int i = 0; i < (int)m_goals.size(); ++i)
+        // {
+            // glm::vec3 template_pos = get_next_goal(i).pos;
+            // m_goals[i].pos = {rdist(m_rng), template_pos.y, rdist(m_rng)};
+            // if (m_goals[i].entity != entt::null && reg.all_of<Transform>(m_goals[i].entity))
+            // {
+            //     auto &transform = reg.get<Transform>(m_goals[i].entity);
+            //     transform.pos = m_goals[i].pos;
+            // }
+        // }
     }
 
     // Return a zero observation to keep Python happy.
@@ -141,7 +187,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     } // shared lock released here
 
     // Fell off the map — end the episode immediately.
-    if (pos.y < World::death_height)
+    if (pos.y < m_config.world.death_height)
         m_done = true;
 
     // Accumulate elapsed time for the episode timeout check.
@@ -177,7 +223,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             if (!sg.valid)
                 continue;
             sg.age += dt;
-            if (sg.age >= SightingConstants::max_age)
+            if (sg.age >= m_config.sighting.max_age)
                 sg = Sighting{};
         }
     }
@@ -226,13 +272,13 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     // --- Pass 2: raycast + record + build obs (registry lock not held) ---
     // 120° FOV: 13 rays spanning -60° to +60° relative to looking direction.
-    const float SPREAD = Raycast::fov_deg / (Raycast::num_rays - 1);
+    const float SPREAD = m_config.raycast.fov_deg / (Raycast::num_rays - 1);
 
     for (int i = 0; i < Raycast::num_rays; ++i)
     {
         float angle_deg = looking_angle + (i - Raycast::num_rays / 2) * SPREAD;
         float rad = glm::radians(angle_deg);
-        JPH::Vec3 dir(std::sin(rad) * Raycast::ray_len, 0.f, std::cos(rad) * Raycast::ray_len);
+        JPH::Vec3 dir(std::sin(rad) * m_config.raycast.ray_len, 0.f, std::cos(rad) * m_config.raycast.ray_len);
 
         JPH::RRayCast ray{JPH::Vec3(pos.x, pos.y, pos.z), dir};
         JPH::RayCastResult hit;
@@ -274,7 +320,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
                 dir.GetX() * hit.mFraction,
                 dir.GetY() * hit.mFraction,
                 dir.GetZ() * hit.mFraction};
-            write_sighting(hit_offset, hit.mBodyID, SightingConstants::wall_interest);
+            write_sighting(hit_offset, hit.mBodyID, m_config.sighting.wall_interest);
         }
 
         // Record goal sightings (interest = 0.9) for any visible goal whose
@@ -333,8 +379,8 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     // NUM_GROUND_RAYS downward-pitched rays spanning the forward 120° FOV.
     // 1.0 = no ground hit within RAY_LEN = edge of map nearby.
     {
-        const float gSpread = Raycast::fov_deg / (Raycast::num_ground_rays - 1);
-        const float pitchRad = glm::radians(Raycast::ground_pitch);
+        const float gSpread = m_config.raycast.fov_deg / (Raycast::num_ground_rays - 1);
+        const float pitchRad = glm::radians(m_config.raycast.ground_pitch);
         const float cosPitch = std::cos(pitchRad);
         const float sinPitch = std::sin(pitchRad); // positive, applied as -y
         for (int i = 0; i < Raycast::num_ground_rays; ++i)
@@ -342,9 +388,9 @@ std::vector<float> NavigationEnv::get_observation(float dt)
             float angle_deg = looking_angle + (i - Raycast::num_ground_rays / 2) * gSpread;
             float rad = glm::radians(angle_deg);
             JPH::Vec3 dir(
-                std::sin(rad) * cosPitch * Raycast::ray_len,
-                -sinPitch * Raycast::ray_len,
-                std::cos(rad) * cosPitch * Raycast::ray_len);
+                std::sin(rad) * cosPitch * m_config.raycast.ray_len,
+                -sinPitch * m_config.raycast.ray_len,
+                std::cos(rad) * cosPitch * m_config.raycast.ray_len);
             JPH::RRayCast ray{JPH::Vec3(pos.x, pos.y, pos.z), dir};
             JPH::RayCastResult hit;
             bool had_hit = physics.physics_system.GetNarrowPhaseQuery()
@@ -354,7 +400,7 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     }
 
     // --- Section D (section_D_base … section_D_base + num_actions + 12) ---
-    const float diag = std::sqrt(2.f) * (World::max - World::min);
+    const float diag = std::sqrt(2.f) * (m_config.world.max - m_config.world.min);
 
     // idx_goal_dir_x/z: normalised direction to LAST KNOWN goal in seeker-local space.
     // Uses m_last_known_goal_pos so the agent retains a search target when
@@ -375,10 +421,10 @@ std::vector<float> NavigationEnv::get_observation(float dt)
 
     // idx_vel_x/z/y, idx_ang_vel_y: seeker velocity, normalised by max_speed / max_angular_speed.
     JPH::Vec3 vel = bi.GetLinearVelocity(body_id);
-    obs[idx_vel_x] = vel.GetX() / Reward::max_speed;
-    obs[idx_vel_z] = vel.GetZ() / Reward::max_speed;
-    obs[idx_vel_y] = vel.GetY() / Reward::max_speed;
-    obs[idx_ang_vel_y] = bi.GetAngularVelocity(body_id).GetY() / Reward::max_angular_speed;
+    obs[idx_vel_x] = vel.GetX() / m_config.reward.max_speed;
+    obs[idx_vel_z] = vel.GetZ() / m_config.reward.max_speed;
+    obs[idx_vel_y] = vel.GetY() / m_config.reward.max_speed;
+    obs[idx_ang_vel_y] = bi.GetAngularVelocity(body_id).GetY() / m_config.reward.max_angular_speed;
     m_speed_xz = std::sqrt(vel.GetX() * vel.GetX() + vel.GetZ() * vel.GetZ());
 
     // idx_angle_sin/cos: looking angle encoded as (sin, cos) to avoid the ±180° discontinuity.
@@ -389,8 +435,8 @@ std::vector<float> NavigationEnv::get_observation(float dt)
     obs[idx_goal_dist] = std::min(last_known_dist / diag, 1.f);
 
     // idx_last_known_x/z: last known goal world position normalised.
-    obs[idx_last_known_x] = (m_last_known_goal_pos.x - World::min) / (World::max - World::min);
-    obs[idx_last_known_z] = (m_last_known_goal_pos.z - World::min) / (World::max - World::min);
+    obs[idx_last_known_x] = (m_last_known_goal_pos.x - m_config.world.min) / (m_config.world.max - m_config.world.min);
+    obs[idx_last_known_z] = (m_last_known_goal_pos.z - m_config.world.min) / (m_config.world.max - m_config.world.min);
 
     // idx_goal_visible: goal currently visible (1.0 = yes, 0.0 = occluded by wall).
     obs[idx_goal_visible] = goal_visible ? 1.f : 0.f;
@@ -433,10 +479,10 @@ float NavigationEnv::compute_reward()
     // Subtract the action penalty for all remaining steps so that falling early
     // is never cheaper than falling late: early termination forfeits potential
     // goal rewards AND is penalised for the steps it won't take.
-    if (pos.y < World::death_height)
+    if (pos.y < m_config.world.death_height)
     {
-        int remaining = Episode::max_steps - m_step_count;
-        return Reward::fall_penalty - static_cast<float>(remaining) * Reward::action_penalty;
+        int remaining = m_config.episode.max_steps - m_step_count;
+        return m_config.reward.fall_penalty - static_cast<float>(remaining) * m_config.reward.action_penalty;
     }
 
     // Edge danger penalty: linear ramp from 0 at edge_danger_dist to
@@ -445,14 +491,14 @@ float NavigationEnv::compute_reward()
     // is still incentivised to reach goals near the edge.
     float edge_penalty = 0.f;
     {
-        float dist_to_edge = std::min({pos.x - World::min,
-                                       World::max - pos.x,
-                                       pos.z - World::min,
-                                       World::max - pos.z});
-        if (dist_to_edge < Reward::edge_danger_dist)
+        float dist_to_edge = std::min({pos.x - m_config.world.min,
+                                       m_config.world.max - pos.x,
+                                       pos.z - m_config.world.min,
+                                       m_config.world.max - pos.z});
+        if (dist_to_edge < m_config.reward.edge_danger_dist)
         {
-            float t = 1.f - dist_to_edge / Reward::edge_danger_dist; // 0 at threshold, 1 at boundary
-            edge_penalty = -Reward::edge_danger_penalty * t;
+            float t = 1.f - dist_to_edge / m_config.reward.edge_danger_dist; // 0 at threshold, 1 at boundary
+            edge_penalty = -m_config.reward.edge_danger_penalty * t;
         }
     }
 
@@ -462,13 +508,10 @@ float NavigationEnv::compute_reward()
     glm::vec2 to_goal = {m_goals[nearest_idx].pos.x - pos.x, m_goals[nearest_idx].pos.z - pos.z};
 
     // Reached goal — big reward, relocate that goal, keep episode alive.
-    if (dist <= World::goal_radius)
+    if (dist <= m_config.world.goal_radius)
     {
-        std::uniform_real_distribution<float> rdist(World::min * World::spawn_margin, World::max * World::spawn_margin);
-        m_goals[nearest_idx].pos.x = rdist(m_rng);
-        m_goals[nearest_idx].pos.z = rdist(m_rng);
-        if (m_goals[nearest_idx].entity != entt::null && reg.all_of<Transform>(m_goals[nearest_idx].entity))
-            reg.get<Transform>(m_goals[nearest_idx].entity).pos = m_goals[nearest_idx].pos;
+        // TODO: make sure that this pulls from the last local goal from the static pattern, not just the next one in the pattern, so that if the pattern is dynamic / procedural the same goal doesn't just respawn in the same place but actually moves to a new location. This also means that the static pattern can be smaller than num_concurrent_goals if desired, since get_next_goal will advance it on every collection.
+        get_next_goal(nearest_idx); // advance the static pattern so the same goal doesn't respawn in the same place
 
         Debug::Log("Seeker_" + std::to_string(m_agent_id) + " collected goal " + std::to_string(nearest_idx) +
                    " (goals this episode: " + std::to_string(++m_goals_this_episode) + ")");
@@ -492,7 +535,7 @@ float NavigationEnv::compute_reward()
         m_was_goal_visible = false;
 
         // Speed bonus: full bonus if reached within quick_threshold, linear ramp to 0 beyond it.
-        float speed_bonus = Reward::goal_speed_bonus * std::max(0.f, 1.f - m_time_since_goal / Reward::goal_quick_threshold);
+        float speed_bonus = m_config.reward.goal_speed_bonus * std::max(0.f, 1.f - m_time_since_goal / m_config.reward.goal_quick_threshold);
 
         m_time_since_goal = 0.f;
 
@@ -509,7 +552,7 @@ float NavigationEnv::compute_reward()
             }
         }
 
-        return Reward::goal_reward + speed_bonus;
+        return m_config.reward.goal_reward + speed_bonus;
     }
 
     // Small shaping reward: delta distance (positive when moving closer).
@@ -525,25 +568,25 @@ float NavigationEnv::compute_reward()
     float goal_world_angle = glm::degrees(std::atan2(to_goal.x, to_goal.y));
     float angle_diff = goal_world_angle - looking_angle;
     float look_alignment = std::cos(glm::radians(angle_diff));
-    float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? Reward::strafe_penalty : 0.f;
-    float fwd_bonus = (pending_action() == Seeker::MOVE_FORWARD && !m_in_air) ? Reward::forward_reward : 0.f;
+    float strafe_pen = (pending_action() == Seeker::STRAFE_LEFT || pending_action() == Seeker::STRAFE_RIGHT) ? m_config.reward.strafe_penalty : 0.f;
+    float fwd_bonus = (pending_action() == Seeker::MOVE_FORWARD && !m_in_air) ? m_config.reward.forward_reward : 0.f;
 
     // Stuck penalty: if the agent is trying to move but barely going anywhere,
-    // it's probably wedged against a wall. Penalise to encourage going around.
+    // it's probably wedged against a wall. Penalize to encourage going around.
     float stuck_pen = 0.f;
-    if (m_step_count > 1 && !m_in_air && m_speed_xz < Reward::stuck_speed_threshold)
+    if (m_step_count > 1 && !m_in_air && m_speed_xz < m_config.reward.stuck_speed_threshold)
     {
         Seeker::Action a = pending_action();
         if (a == Seeker::MOVE_FORWARD || a == Seeker::MOVE_BACKWARD || a == Seeker::STRAFE_LEFT || a == Seeker::STRAFE_RIGHT)
-            stuck_pen = -Reward::stuck_penalty;
+            stuck_pen = -m_config.reward.stuck_penalty;
     }
 
-    return shaping + Reward::look_weight * look_alignment - Reward::action_penalty - strafe_pen + edge_penalty + stuck_pen + fwd_bonus;
+    return shaping + m_config.reward.look_weight * look_alignment - m_config.reward.action_penalty - strafe_pen + edge_penalty + stuck_pen + fwd_bonus;
 }
 
 bool NavigationEnv::is_done() const
 {
-    return m_done || m_step_count >= Episode::max_steps || m_elapsed_seconds >= Episode::max_seconds || m_time_since_goal >= m_current_goal_time_limit;
+    return m_done || m_step_count >= m_config.episode.max_steps || m_elapsed_seconds >= m_config.episode.max_seconds || m_time_since_goal >= m_current_goal_time_limit;
 }
 
 bool NavigationEnv::is_terminal() const
@@ -565,23 +608,6 @@ void NavigationEnv::apply_action(int action)
     m_pending_action = action;
     ++m_step_count;
 }
-
-// void NavigationEnv::move_goal_random()
-// {
-//     std::uniform_real_distribution<float> dist(MAP_MIN * 0.8f, MAP_MAX * 0.8f);
-//     float gx = dist(m_rng);
-//     float gz = dist(m_rng);
-//     m_goal_pos = {gx, m_goal_pos.y, gz};
-//     // NOTE: the caller is responsible for writing m_goal_pos to the goal
-//     // entity's Transform while holding the registry lock (to avoid deadlock).
-
-//     // Invalidate all sightings — their positions are relative to the old
-//     // world state and are no longer useful context for the new goal.
-//     for (auto &ray_buf : m_sightings)
-//         for (auto &sg : ray_buf)
-//             sg = Sighting{};
-//     m_sight_head.fill(0);
-// }
 
 Seeker::Action NavigationEnv::pending_action() const
 {
@@ -620,13 +646,13 @@ std::unordered_map<std::string, float> NavigationEnv::get_env_data() const
 std::unordered_map<std::string, std::unordered_map<std::string, float>> NavigationEnv::get_config_data() const
 {
     return {
-        {"sizes", {{"num_states", Sizes::num_states}, {"num_actions", Sizes::num_actions}, {"action_history", Sizes::action_history}, {"num_goals", Sizes::num_goals}}},
-        {"raycast", {{"num_rays", Raycast::num_rays}, {"num_ground_rays", Raycast::num_ground_rays}, {"ray_len", Raycast::ray_len}, {"ground_pitch", Raycast::ground_pitch}, {"fov_deg", Raycast::fov_deg}}},
-        {"sighting", {{"history", SightingConstants::history}, {"max_age", SightingConstants::max_age}, {"max_stale", SightingConstants::max_stale}, {"wall_interest", SightingConstants::wall_interest}, {"goal_interest", SightingConstants::goal_interest}}},
-        {"world", {{"min", World::min}, {"max", World::max}, {"death_height", World::death_height}, {"spawn_margin", World::spawn_margin}, {"goal_radius", World::goal_radius}}},
-        {"episode", {{"max_steps", Episode::max_steps}, {"max_seconds", Episode::max_seconds}}},
-        {"curriculum", {{"max_goal_search_seconds", Curriculum::max_goal_search_seconds}, {"min_goal_search_seconds", Curriculum::min_goal_search_seconds}, {"search_time_fall_rate", Curriculum::search_time_fall_rate}, {"boundary_wall_episodes", Curriculum::boundary_wall_episodes}}},
-        {"reward", {{"goal_reward", Reward::goal_reward}, {"goal_speed_bonus", Reward::goal_speed_bonus}, {"goal_quick_threshold", Reward::goal_quick_threshold}, {"look_weight", Reward::look_weight}, {"action_penalty", Reward::action_penalty}, {"strafe_penalty", Reward::strafe_penalty}, {"edge_danger_dist", Reward::edge_danger_dist}, {"edge_danger_penalty", Reward::edge_danger_penalty}, {"stuck_speed_threshold", Reward::stuck_speed_threshold}, {"stuck_penalty", Reward::stuck_penalty}, {"forward_reward", Reward::forward_reward}, {"max_speed", Reward::max_speed}, {"max_angular_speed", Reward::max_angular_speed}, {"fall_penalty", Reward::fall_penalty}}},
+        {"sizes", {{"num_states", Sizes::num_states}, {"num_actions", Sizes::num_actions}, {"action_history", Sizes::action_history}}},
+        {"raycast", {{"num_rays", Raycast::num_rays}, {"num_ground_rays", Raycast::num_ground_rays}, {"ray_len", m_config.raycast.ray_len}, {"ground_pitch", m_config.raycast.ground_pitch}, {"fov_deg", m_config.raycast.fov_deg}}},
+        {"sighting", {{"history", SightingConstants::history}, {"max_age", SightingConstants::max_age}, {"max_stale", SightingConstants::max_stale}, {"wall_interest", m_config.sighting.wall_interest}, {"goal_interest", m_config.sighting.goal_interest}}},
+        {"world", {{"min", m_config.world.min}, {"max", m_config.world.max}, {"death_height", m_config.world.death_height}, {"num_concurrent_goals", m_config.world.num_concurrent_goals}, {"goal_radius", m_config.world.goal_radius}}},
+        {"episode", {{"max_steps", static_cast<float>(m_config.episode.max_steps)}, {"max_seconds", m_config.episode.max_seconds}}},
+        {"curriculum", {{"max_goal_search_seconds", m_config.curriculum.max_goal_search_seconds}, {"min_goal_search_seconds", m_config.curriculum.min_goal_search_seconds}, {"search_time_fall_rate", m_config.curriculum.search_time_fall_rate}, {"boundary_wall_episodes", static_cast<float>(m_config.curriculum.boundary_wall_episodes)}}},
+        {"reward", {{"goal_reward", m_config.reward.goal_reward}, {"goal_speed_bonus", m_config.reward.goal_speed_bonus}, {"goal_quick_threshold", m_config.reward.goal_quick_threshold}, {"look_weight", m_config.reward.look_weight}, {"action_penalty", m_config.reward.action_penalty}, {"strafe_penalty", m_config.reward.strafe_penalty}, {"edge_danger_dist", m_config.reward.edge_danger_dist}, {"edge_danger_penalty", m_config.reward.edge_danger_penalty}, {"stuck_speed_threshold", m_config.reward.stuck_speed_threshold}, {"stuck_penalty", m_config.reward.stuck_penalty}, {"forward_reward", m_config.reward.forward_reward}, {"max_speed", m_config.reward.max_speed}, {"max_angular_speed", m_config.reward.max_angular_speed}, {"fall_penalty", m_config.reward.fall_penalty}}},
         {"angles", {{"full_circle_deg", Angles::full_circle_deg}, {"half_circle_deg", Angles::half_circle_deg}, {"deg_to_rad", Angles::deg_to_rad}}},
     };
 }
@@ -640,4 +666,84 @@ void NavigationEnv::set_env_data(const std::unordered_map<std::string, float> &d
     auto it2 = data.find("episode_count");
     if (it2 != data.end())
         m_episode_count = static_cast<int>(it2->second);
+}
+
+void NavigationEnv::set_config_data(const std::string &category, const std::string &name, float value)
+{
+    if (category == "raycast")
+    {
+        if (name == "ray_len")
+            m_config.raycast.ray_len = value;
+        else if (name == "ground_pitch")
+            m_config.raycast.ground_pitch = value;
+        else if (name == "fov_deg")
+            m_config.raycast.fov_deg = value;
+    }
+    else if (category == "sighting")
+    {
+        if (name == "wall_interest")
+            m_config.sighting.wall_interest = value;
+        else if (name == "goal_interest")
+            m_config.sighting.goal_interest = value;
+    }
+    else if (category == "world")
+    {
+        if (name == "min")
+            m_config.world.min = value;
+        else if (name == "max")
+            m_config.world.max = value;
+        else if (name == "death_height")
+            m_config.world.death_height = value;
+        else if (name == "num_concurrent_goals")
+            m_config.world.num_concurrent_goals = static_cast<int>(value);
+        else if (name == "goal_radius")
+            m_config.world.goal_radius = value;
+    }
+    else if (category == "episode")
+    {
+        if (name == "max_steps")
+            m_config.episode.max_steps = static_cast<int>(value);
+        else if (name == "max_seconds")
+            m_config.episode.max_seconds = value;
+    }
+    else if (category == "curriculum")
+    {
+        if (name == "max_goal_search_seconds")
+            m_config.curriculum.max_goal_search_seconds = value;
+        else if (name == "min_goal_search_seconds")
+            m_config.curriculum.min_goal_search_seconds = value;
+        else if (name == "search_time_fall_rate")
+            m_config.curriculum.search_time_fall_rate = value;
+    }
+    else if (category == "reward")
+    {
+        if (name == "fall_penalty")
+            m_config.reward.fall_penalty = value;
+        else if (name == "goal_reward")
+            m_config.reward.goal_reward = value;
+        else if (name == "look_weight")
+            m_config.reward.look_weight = value;
+        else if (name == "action_penalty")
+            m_config.reward.action_penalty = value;
+        else if (name == "strafe_penalty")
+            m_config.reward.strafe_penalty = value;
+        else if (name == "forward_reward")
+            m_config.reward.forward_reward = value;
+        else if (name == "goal_speed_bonus")
+            m_config.reward.goal_speed_bonus = value;
+        else if (name == "goal_quick_threshold")
+            m_config.reward.goal_quick_threshold = value;
+        else if (name == "max_speed")
+            m_config.reward.max_speed = value;
+        else if (name == "max_angular_speed")
+            m_config.reward.max_angular_speed = value;
+        else if (name == "edge_danger_dist")
+            m_config.reward.edge_danger_dist = value;
+        else if (name == "edge_danger_penalty")
+            m_config.reward.edge_danger_penalty = value;
+        else if (name == "stuck_speed_threshold")
+            m_config.reward.stuck_speed_threshold = value;
+        else if (name == "stuck_penalty")
+            m_config.reward.stuck_penalty = value;
+    }
 }

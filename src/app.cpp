@@ -2,7 +2,9 @@
 #include "ui.h"
 #include "scenes/StartScene.hpp"
 #include "scenes/LearnScene.hpp"
+#include "scenes/EdgeDangerScene.hpp"
 #include "scenes/TestScene.hpp"
+#include "scenes/ShowCase.hpp"
 #include "python/init.h"
 
 
@@ -108,6 +110,8 @@ void Application::onInit()
 
     sm.add_scene<StartScene>("start", sm);
     sm.add_scene<LearnScene>("learn", sm);
+    sm.add_scene<EdgeDangerScene>("edge_danger", sm);
+    sm.add_scene<ShowCase>("showcase", sm);
     sm.add_scene<TestScene>("test", sm);
     
 }

@@ -90,6 +90,38 @@ void LearnScene::onDestroy()
     _clear_python_env_refs();
 }
 
+void LearnScene::make_map()
+{
+    
+    // Walls — static obstacles the agent must navigate around.
+    // pos is the base (floor-level) centre; half_extents defines size from there.
+    // Map is now ±20 so all positions scaled ~2× from the old ±10 layout.
+    makeWall(em, {0.f,    0.f,  0.f},  {1.5f,   3.f, 0.25f}); // smaller centre barrier
+    makeWall(em, {-8.f,   0.f,  6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (left)
+    makeWall(em, {8.f,    0.f, -6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (right)
+    makeWall(em, {-14.f,  0.f, -8.f},  {0.25f,  3.f, 8.f});   // far left vertical
+    makeWall(em, {14.f,   0.f,  8.f},  {0.25f,  3.f, 8.f});   // far right vertical
+
+    // Curriculum boundary walls — keep the agent from falling off early in training.
+    // Removed after Curriculum::boundary_wall_episodes resets by remove_boundary_walls().
+    if (NavigationEnv::Curriculum::boundary_wall_episodes > 0)
+    {
+        const float e  = NavigationEnv::World::max;          // 20
+        const float bt = 1.5f;                               // thick — robust collision
+        const float hw = e + bt + 2.f;                      // half-width: span + corner overlap
+        const float bh = 10.f;                              // tall enough to block the seeker
+        // Centre each wall at (e + bt) so the inner face sits exactly at ±e.
+        m_boundary_walls = {
+            makeWall(em, {0.f, 0.f, -(e + bt)}, {hw, bh, bt}), // north
+            makeWall(em, {0.f, 0.f,  (e + bt)}, {hw, bh, bt}), // south
+            makeWall(em, {-(e + bt), 0.f, 0.f}, {bt, bh, hw}), // west
+            makeWall(em, { (e + bt), 0.f, 0.f}, {bt, bh, hw}), // east
+        };
+    }
+    m_walls_removed = false;
+
+}
+
 void LearnScene::onActivate()
 {
     // Bind Python functions now — the module is already in sys.modules so this is instant.
@@ -135,33 +167,7 @@ void LearnScene::onActivate()
     makeGround(em);
     makeLight(em, "sun", {0, 10, 0}, Magic::DirectionLight{hexToRgbStoi("#ffffff"), {0.5, -1, 0.5}});
 
-    // Walls — static obstacles the agent must navigate around.
-    // pos is the base (floor-level) centre; half_extents defines size from there.
-    // Map is now ±20 so all positions scaled ~2× from the old ±10 layout.
-    makeWall(em, {0.f,    0.f,  0.f},  {1.5f,   3.f, 0.25f}); // smaller centre barrier
-    makeWall(em, {-8.f,   0.f,  6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (left)
-    makeWall(em, {8.f,    0.f, -6.f},  {0.25f,  3.f, 6.f});   // perpendicular arm (right)
-    makeWall(em, {-14.f,  0.f, -8.f},  {0.25f,  3.f, 8.f});   // far left vertical
-    makeWall(em, {14.f,   0.f,  8.f},  {0.25f,  3.f, 8.f});   // far right vertical
-
-    // Curriculum boundary walls — keep the agent from falling off early in training.
-    // Removed after Curriculum::boundary_wall_episodes resets by remove_boundary_walls().
-    if (NavigationEnv::Curriculum::boundary_wall_episodes > 0)
-    {
-        const float e  = NavigationEnv::World::max;          // 20
-        const float bt = 1.5f;                               // thick — robust collision
-        const float hw = e + bt + 2.f;                      // half-width: span + corner overlap
-        const float bh = 10.f;                              // tall enough to block the seeker
-        // Centre each wall at (e + bt) so the inner face sits exactly at ±e.
-        m_boundary_walls = {
-            makeWall(em, {0.f, 0.f, -(e + bt)}, {hw, bh, bt}), // north
-            makeWall(em, {0.f, 0.f,  (e + bt)}, {hw, bh, bt}), // south
-            makeWall(em, {-(e + bt), 0.f, 0.f}, {bt, bh, hw}), // west
-            makeWall(em, { (e + bt), 0.f, 0.f}, {bt, bh, hw}), // east
-        };
-    }
-    m_walls_removed = false;
-
+    make_map();
     // ---- Per-agent slots: goals + seeker + env ----
     // Each agent has its own goal entities but they are placed at the same
     // initial positions so all agents start with an equivalent layout.
@@ -244,6 +250,18 @@ void LearnScene::onDeactivate()
     m_walls_removed = false;
     Seeker::ClearBodyIds();
 }
+
+void LearnScene::implement_curriculum(int episode_count)
+{
+    // curriculum implementation: remove boundary walls after a certain
+    // amount of total experience collected across all agents.
+    if (!m_walls_removed &&
+        episode_count >= NavigationEnv::Curriculum::boundary_wall_episodes)
+    {
+        remove_boundary_walls();
+    }
+}
+
 
 // doesn't get called when the engine is paused
 void LearnScene::update(double dt)
@@ -406,13 +424,10 @@ void LearnScene::update(double dt)
                 }
 
                 // Curriculum: remove boundary walls once enough total experience collected.
-                if (!m_walls_removed)
-                {
-                    int total_eps = 0;
-                    for (auto &s : m_agents) total_eps += s.env->episode_count();
-                    if (total_eps >= NavigationEnv::Curriculum::boundary_wall_episodes)
-                        remove_boundary_walls();
-                }
+                int total_eps = 0;
+                for (auto &s : m_agents) total_eps += s.env->episode_count();
+                implement_curriculum(total_eps);
+                
             }
         }
         catch (nb::python_error &e)
