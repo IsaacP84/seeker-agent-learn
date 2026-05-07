@@ -53,3 +53,10 @@ def feedback(prev_obs, action, reward, done, next_obs, agent_id=0):
 # Flushes any remaining rollout buffer data before the synchronized reset.
 def round_complete():
     scene_agent.on_round_complete()
+
+# Called from C++ when LearnScene deactivates.
+def save_checkpoint():
+    try:
+        scene_agent.save_checkpoint(force=True)
+    except Exception as e:
+        print(f'Error saving checkpoint on scene exit: {e}')

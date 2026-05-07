@@ -604,6 +604,11 @@ class Agent:
         if round_num % 1 == 0:
             self._save_checkpoint()
 
+    def save_checkpoint(self, force=False):
+        if self._ppo_worker is not None and self._ppo_worker.is_alive():
+            self._ppo_worker.join()
+        self._save_checkpoint(force=force)
+
     # ------------------------------------------------------------------
     def _run_ppo_update_async(self, last_value):
         """Snapshot the buffer and run the PPO update on a background thread.
@@ -794,7 +799,7 @@ class Agent:
             except OSError:
                 pass
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, force=False):
         episode = len(self.rewards_per_episode)
         self._trim_histories()
 
@@ -832,7 +837,7 @@ class Agent:
         else:
             diag_path = None
 
-        if self.full_checkpoint_interval > 0 and episode % self.full_checkpoint_interval == 0:
+        if force or (self.full_checkpoint_interval > 0 and episode % self.full_checkpoint_interval == 0):
             ckpt_file = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}_ep{episode:08d}.pt')
             if self.save_replay_buffer_on_full and self.buffer._size > 0:
                 buffer_snapshot = self.buffer.snapshot()

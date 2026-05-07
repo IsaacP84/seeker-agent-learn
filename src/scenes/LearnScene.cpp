@@ -236,6 +236,19 @@ void LearnScene::onDeactivate()
     Application::get().use_locked_simulation_speed(true);
     Application::get().SetRelativeMouseMode(false);
 
+    if (m_python_scene && nb::hasattr(m_python_scene, "save_checkpoint"))
+    {
+        nb::gil_scoped_acquire acquire;
+        try
+        {
+            m_python_scene.attr("save_checkpoint")();
+        }
+        catch (nb::python_error &e)
+        {
+            Debug::Log(std::string("Failed to save checkpoint on LearnScene deactivate: ") + e.what());
+        }
+    }
+
     _clear_python_env_refs();
 
     m_entity_manager->clear();
